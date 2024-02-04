@@ -1,4 +1,6 @@
 -c constraints.in
 -c base.txt
 
-unstructured.paddleocr==2.6.1.3
+paddleocr==2.7.0.3
+paddlepaddle-gpu
+onnxruntime-gpu

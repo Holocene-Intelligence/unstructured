@@ -19,7 +19,7 @@ from unstructured.partition.utils.ocr_models.ocr_interface import OCRAgent
 class OCRAgentPaddle(OCRAgent):
     def load_agent(self, language: str = DEFAULT_PADDLE_LANG):
         import paddle
-        from unstructured_paddleocr import PaddleOCR
+        from paddleocr import PaddleOCR
 
         """Loads the PaddleOCR agent as a global variable to ensure that we only load it once."""
 
@@ -42,7 +42,9 @@ class OCRAgentPaddle(OCRAgent):
                 use_gpu=gpu_available,
                 lang=language,
                 enable_mkldnn=True,
-                show_log=False,
+                show_log=True,
+                use_tensorrt=True,
+            ocr_version="PP-OCRv4"
             )
         except AttributeError:
             paddle_ocr = PaddleOCR(
@@ -50,7 +52,9 @@ class OCRAgentPaddle(OCRAgent):
                 use_gpu=gpu_available,
                 lang=language,
                 enable_mkldnn=False,
-                show_log=False,
+                show_log=True,
+                use_tensorrt=True,
+            ocr_version="PP-OCRv4"
             )
         return paddle_ocr
 
