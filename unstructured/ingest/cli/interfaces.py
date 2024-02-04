@@ -1,12 +1,18 @@
+from __future__ import annotations
+
+import json
+import os.path
 import typing as t
 from abc import abstractmethod
 from dataclasses import fields
-from gettext import ngettext
+from gettext import gettext, ngettext
 from pathlib import Path
 
 import click
-from dataclasses_json.core import Json, _decode_dataclass
+from dataclasses_json.core import Json
+from typing_extensions import Self
 
+from unstructured.chunking.base import CHUNK_MAX_CHARS_DEFAULT, CHUNK_MULTI_PAGE_DEFAULT
 from unstructured.ingest.interfaces import (
     BaseConfig,
     ChunkingConfig,
@@ -20,6 +26,58 @@ from unstructured.ingest.interfaces import (
 )
 
 
+class Dict(click.ParamType):
+    name = "dict"
+
+    def convert(
+        self,
+        value: t.Any,
+        param: t.Optional[click.Parameter] = None,
+        ctx: t.Optional[click.Context] = None,
+    ) -> t.Any:
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            self.fail(
+                gettext(
+                    "{value} is not a valid json value.",
+                ).format(value=value),
+                param,
+                ctx,
+            )
+
+
+class FileOrJson(click.ParamType):
+    name = "file-or-json"
+
+    def __init__(self, allow_raw_str: bool = False):
+        self.allow_raw_str = allow_raw_str
+
+    def convert(
+        self,
+        value: t.Any,
+        param: t.Optional[click.Parameter] = None,
+        ctx: t.Optional[click.Context] = None,
+    ) -> t.Any:
+        # check if valid file
+        full_path = os.path.abspath(os.path.expanduser(value))
+        if os.path.isfile(full_path):
+            return str(Path(full_path).resolve())
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                if self.allow_raw_str:
+                    return value
+        self.fail(
+            gettext(
+                "{value} is not a valid json string nor an existing filepath.",
+            ).format(value=value),
+            param,
+            ctx,
+        )
+
+
 class DelimitedString(click.ParamType):
     name = "delimited-string"
 
@@ -30,8 +88,8 @@ class DelimitedString(click.ParamType):
     def convert(
         self,
         value: t.Any,
-        param: t.Optional[click.Parameter],
-        ctx: t.Optional[click.Context],
+        param: t.Optional[click.Parameter] = None,
+        ctx: t.Optional[click.Context] = None,
     ) -> t.Any:
         # In case a list is provided as the default, will not break
         if isinstance(value, list):
@@ -79,6 +137,10 @@ class CliMixin:
                 cmd.params.append(param)
 
 
+class CliConfig(BaseConfig, CliMixin):
+    pass
+
+
 class CliRetryStrategyConfig(RetryStrategyConfig, CliMixin):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
@@ -101,12 +163,7 @@ class CliRetryStrategyConfig(RetryStrategyConfig, CliMixin):
         return options
 
     @classmethod
-    def from_dict(
-        cls,
-        kvs: Json,
-        *,
-        infer_missing=False,
-    ):
+    def from_dict(cls, kvs: Json, **kwargs):
         """
         Return None if none of the fields are being populated
         """
@@ -115,7 +172,7 @@ class CliRetryStrategyConfig(RetryStrategyConfig, CliMixin):
             field_values = [kvs.get(n) for n in field_names if kvs.get(n)]
             if not field_values:
                 return None
-        return _decode_dataclass(cls, kvs, infer_missing)
+        return super().from_dict(kvs=kvs, **kwargs)
 
 
 class CliProcessorConfig(ProcessorConfig, CliMixin):
@@ -207,16 +264,10 @@ class CliPartitionConfig(PartitionConfig, CliMixin):
     def get_cli_options() -> t.List[click.Option]:
         options = [
             click.Option(
-                ["--skip-infer-table-types"],
-                type=DelimitedString(),
-                default=None,
-                help="Optional list of document types to skip table extraction on",
-            ),
-            click.Option(
                 ["--pdf-infer-table-structure"],
+                is_flag=True,
                 default=False,
-                help="If set to True, partition will include the table's text "
-                "content in the response.",
+                help="Partition will include the table's text_as_html " "in the response metadata.",
             ),
             click.Option(
                 ["--strategy"],
@@ -238,6 +289,17 @@ class CliPartitionConfig(PartitionConfig, CliMixin):
                 default=None,
                 help="Text encoding to use when reading documents. By default the encoding is "
                 "detected automatically.",
+            ),
+            click.Option(
+                ["--skip-infer-table-types"],
+                type=DelimitedString(),
+                default=None,
+                help="Optional list of document types to skip table extraction on",
+            ),
+            click.Option(
+                ["--additional-partition-args"],
+                type=Dict(),
+                help="A json string representation of values to pass through to partition()",
             ),
             click.Option(
                 ["--fields-include"],
@@ -286,11 +348,16 @@ class CliPartitionConfig(PartitionConfig, CliMixin):
                 default=None,
                 help="API Key for partition endpoint.",
             ),
+            click.Option(
+                ["--hi-res-model-name"],
+                default=None,
+                help="Model name for hi-res strategy.",
+            ),
         ]
         return options
 
 
-class CliRecursiveConfig(BaseConfig, CliMixin):
+class CliRecursiveConfig(CliConfig):
     recursive: bool
 
     @staticmethod
@@ -331,6 +398,13 @@ class CliFilesStorageConfig(FileStorageConfig, CliMixin):
                 help="Recursively download files in their respective folders "
                 "otherwise stop at the files in provided folder level.",
             ),
+            click.Option(
+                ["--file-glob"],
+                default=None,
+                type=DelimitedString(),
+                help="A comma-separated list of file globs to limit which types of "
+                "local files are accepted, e.g. '*.html,*.txt'",
+            ),
         ]
         return options
 
@@ -338,13 +412,25 @@ class CliFilesStorageConfig(FileStorageConfig, CliMixin):
 class CliEmbeddingConfig(EmbeddingConfig, CliMixin):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
+        from unstructured.embed import EMBEDDING_PROVIDER_TO_CLASS_MAP
+
         options = [
             click.Option(
+                ["--embedding-provider"],
+                help="Type of the embedding class to be used. Can be one of: "
+                f"{list(EMBEDDING_PROVIDER_TO_CLASS_MAP)}",
+                type=click.Choice(list(EMBEDDING_PROVIDER_TO_CLASS_MAP)),
+            ),
+            click.Option(
                 ["--embedding-api-key"],
-                help="openai api key",
+                help="API key for the embedding model, for the case an API key is needed.",
+                type=str,
+                default=None,
             ),
             click.Option(
                 ["--embedding-model-name"],
+                help="Embedding model name, if needed. "
+                "Chooses a particular LLM between different options, to embed with it.",
                 type=str,
                 default=None,
             ),
@@ -352,12 +438,7 @@ class CliEmbeddingConfig(EmbeddingConfig, CliMixin):
         return options
 
     @classmethod
-    def from_dict(
-        cls,
-        kvs: Json,
-        *,
-        infer_missing=False,
-    ):
+    def from_dict(cls, kvs: Json, **kwargs):
         """
         Extension of the dataclass from_dict() to avoid a naming conflict with other CLI params.
         This allows CLI arguments to be prepended with embedding_ during CLI invocation but
@@ -371,10 +452,10 @@ class CliEmbeddingConfig(EmbeddingConfig, CliMixin):
             }
             if len(new_kvs.keys()) == 0:
                 return None
-            if not new_kvs.get("api_key", None):
+            if not new_kvs.get("provider", None):
                 return None
-            return _decode_dataclass(cls, new_kvs, infer_missing)
-        return _decode_dataclass(cls, kvs, infer_missing)
+            return super().from_dict(new_kvs, **kwargs)
+        return super().from_dict(kvs, **kwargs)
 
 
 class CliChunkingConfig(ChunkingConfig, CliMixin):
@@ -385,57 +466,108 @@ class CliChunkingConfig(ChunkingConfig, CliMixin):
                 ["--chunk-elements"],
                 is_flag=True,
                 default=False,
+                help="Deprecated, use --chunking-strategy instead.",
+            ),
+            click.Option(
+                ["--chunking-strategy"],
+                type=click.Choice(["basic", "by_title"]),
+                help="The rule-set to use to form chunks. Omit to disable chunking.",
             ),
             click.Option(
                 ["--chunk-multipage-sections"],
                 is_flag=True,
-                default=False,
+                default=CHUNK_MULTI_PAGE_DEFAULT,
+                help=(
+                    "Ignore page boundaries when chunking such that elements from two different"
+                    " pages can appear in the same chunk. Only operative for 'by_title'"
+                    " chunking-strategy."
+                ),
             ),
             click.Option(
-                ["--chunk-combine-under-n-chars"],
+                ["--chunk-combine-text-under-n-chars"],
                 type=int,
-                default=500,
-                show_default=True,
+                help=(
+                    "Combine consecutive chunks when the first does not exceed this length and"
+                    " the second will fit without exceeding the hard-maximum length. Only"
+                    " operative for 'by_title' chunking-strategy."
+                ),
             ),
             click.Option(
                 ["--chunk-new-after-n-chars"],
                 type=int,
-                default=1500,
+                help=(
+                    "Soft-maximum chunk length. Another element will not be added to a chunk of"
+                    " this length even when it would fit without exceeding the hard-maximum"
+                    " length."
+                ),
+            ),
+            click.Option(
+                ["--chunk-max-characters"],
+                type=int,
+                default=CHUNK_MAX_CHARS_DEFAULT,
                 show_default=True,
+                help=(
+                    "Hard maximum chunk length. No chunk will exceed this length. An oversized"
+                    " element will be divided by text-splitting to fit this window."
+                ),
+            ),
+            click.Option(
+                ["--chunk-overlap"],
+                type=int,
+                default=0,
+                show_default=True,
+                help=(
+                    "Prefix chunk text with last overlap=N characters of prior chunk. Only"
+                    " applies to oversized chunks divided by text-splitting. To apply overlap to"
+                    " non-oversized chunks use the --overlap-all option."
+                ),
+            ),
+            click.Option(
+                ["--chunk-overlap-all"],
+                is_flag=True,
+                default=False,
+                help=(
+                    "Apply overlap to chunks formed from whole elements as well as those formed"
+                    " by text-splitting oversized elements. Overlap length is take from --overlap"
+                    " option value."
+                ),
             ),
         ]
         return options
 
     @classmethod
-    def from_dict(
-        cls,
-        kvs: Json,
-        *,
-        infer_missing=False,
-    ):
+    def from_dict(cls, kvs: Json, **kwargs: t.Any) -> t.Optional[Self]:
+        """Extension of dataclass from_dict() to avoid a naming conflict with other CLI params.
+
+        This allows CLI arguments to be prefixed with "chunking_" during CLI invocation but doesn't
+        require that as part of the field names in this class
         """
-        Extension of the dataclass from_dict() to avoid a naming conflict with other CLI params.
-        This allows CLI arguments to be prepended with chunking_ during CLI invocation but
-        doesn't require that as part of the field names in this class
-        """
-        if isinstance(kvs, dict):
-            new_kvs = {}
-            if "chunk_elements" in kvs:
-                chunk_elements = kvs.pop("chunk_elements")
-                if not chunk_elements:
-                    return None
-                new_kvs["chunk_elements"] = chunk_elements
-            new_kvs.update(
-                {
-                    k[len("chunking_") :]: v  # noqa: E203
-                    for k, v in kvs.items()
-                    if k.startswith("chunking_")
-                },
+        if not isinstance(kvs, dict):
+            return super().from_dict(kvs=kvs, **kwargs)
+
+        options: t.Dict[str, t.Any] = kvs.copy()
+        chunk_elements = options.pop("chunk_elements", None)
+        chunking_strategy = options.pop("chunking_strategy", None)
+        # -- when neither are specified, chunking is not requested --
+        if not chunk_elements and not chunking_strategy:
+            return None
+
+        def iter_kv_pairs() -> t.Iterator[t.Tuple[str, t.Any]]:
+            # -- newer `chunking_strategy` option takes precedence over legacy `chunk_elements` --
+            if chunking_strategy:
+                yield "chunking_strategy", chunking_strategy
+            # -- but legacy case is still supported, equivalent to `chunking_strategy="by_title" --
+            elif chunk_elements:
+                yield "chunking_strategy", "by_title"
+
+            yield from (
+                (key[len("chunk_") :], value)
+                for key, value in options.items()
+                if key.startswith("chunk_")
             )
-            if len(new_kvs.keys()) == 0:
-                return None
-            return _decode_dataclass(cls, new_kvs, infer_missing)
-        return _decode_dataclass(cls, kvs, infer_missing)
+
+        new_kvs = dict(iter_kv_pairs())
+        return None if len(new_kvs) == 0 else super().from_dict(kvs=new_kvs, **kwargs)
 
 
 class CliPermissionsConfig(PermissionsConfig, CliMixin):
@@ -461,12 +593,7 @@ class CliPermissionsConfig(PermissionsConfig, CliMixin):
         return options
 
     @classmethod
-    def from_dict(
-        cls,
-        kvs: Json,
-        *,
-        infer_missing=False,
-    ):
+    def from_dict(cls, kvs: Json, **kwargs):
         """
         Extension of the dataclass from_dict() to avoid a naming conflict with other CLI params.
         This allows CLI arguments to be prepended with permissions_ during CLI invocation but
@@ -474,31 +601,23 @@ class CliPermissionsConfig(PermissionsConfig, CliMixin):
         CLI params are provided as intended.
         """
 
-        if (
-            isinstance(kvs, dict)
-            and any(
-                [
-                    kvs["permissions_application_id"]
-                    or kvs["permissions_client_cred"]
-                    or kvs["permissions_tenant"],
-                ],
-            )
-            and not all(
-                [
-                    kvs["permissions_application_id"]
-                    and kvs["permissions_client_cred"]
-                    and kvs["permissions_tenant"],
-                ],
-            )
-        ):
-            raise ValueError(
-                "Please provide either none or all of the following optional values:\n"
-                "--permissions-application-id\n"
-                "--permissions-client-cred\n"
-                "--permissions-tenant",
-            )
-
         if isinstance(kvs, dict):
+            permissions_application_id = kvs.get("permissions_application_id")
+            permissions_client_cred = kvs.get("permissions_client_cred")
+            permissions_tenant = kvs.get("permissions_tenant")
+            permission_values = [
+                permissions_application_id,
+                permissions_client_cred,
+                permissions_tenant,
+            ]
+            if any(permission_values) and not all(permission_values):
+                raise ValueError(
+                    "Please provide either none or all of the following optional values:\n"
+                    "--permissions-application-id\n"
+                    "--permissions-client-cred\n"
+                    "--permissions-tenant",
+                )
+
             new_kvs = {
                 k[len("permissions_") :]: v  # noqa: E203
                 for k, v in kvs.items()
@@ -506,5 +625,5 @@ class CliPermissionsConfig(PermissionsConfig, CliMixin):
             }
             if len(new_kvs.keys()) == 0:
                 return None
-            return _decode_dataclass(cls, new_kvs, infer_missing)
-        return _decode_dataclass(cls, kvs, infer_missing)
+            return super().from_dict(kvs=new_kvs, **kwargs)
+        return super().from_dict(kvs=kvs, **kwargs)

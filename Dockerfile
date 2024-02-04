@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:experimental
-FROM quay.io/unstructured-io/base-images:rocky9.2-5@sha256:1721c3b0711e4e90587e3b4917f1b616e4603ddf5b4986bfaa68d02d82a13aba as base
+FROM quay.io/unstructured-io/base-images:rocky9.2-9@sha256:73d8492452f086144d4b92b7931aa04719f085c74d16cae81e8826ef873729c9 as base
 
 # NOTE(crag): NB_USER ARG for mybinder.org compat:
 #             https://mybinder.readthedocs.io/en/latest/tutorials/dockerfile.html
@@ -15,8 +15,6 @@ ENV PATH="/home/usr/.local/bin:${PATH}"
 RUN groupadd --gid ${NB_UID} ${NB_USER}
 RUN useradd --uid ${NB_UID} --gid ${NB_UID} ${NB_USER}
 WORKDIR ${HOME}
-RUN mkdir ${HOME}/.ssh && chmod go-rwx ${HOME}/.ssh \
-  &&  ssh-keyscan -t rsa github.com >> ${HOME}/.ssh/known_hosts
 
 FROM base as deps
 # Copy and install Unstructured
@@ -38,6 +36,6 @@ USER ${NB_USER}
 COPY example-docs example-docs
 COPY unstructured unstructured
 
-RUN python3.10 -c "from unstructured.ingest.pipeline.initialize import initialize; initialize()"
+RUN python3.10 -c "from unstructured.partition.model_init import initialize; initialize()"
 
 CMD ["/bin/bash"]

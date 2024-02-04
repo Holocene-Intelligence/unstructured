@@ -5,7 +5,11 @@ import pathlib
 
 import pytest
 
-from test_unstructured.unit_utils import assert_round_trips_through_JSON, example_doc_path
+from test_unstructured.unit_utils import (
+    assert_round_trips_through_JSON,
+    example_doc_path,
+    parse_optional_datetime,
+)
 from unstructured.chunking.title import chunk_by_title
 from unstructured.documents.elements import (
     ElementMetadata,
@@ -133,6 +137,7 @@ def test_partition_email_from_filename_malformed_encoding():
         ("fake-email-utf-16.eml", EXPECTED_OUTPUT),
         ("fake-email-utf-16-be.eml", EXPECTED_OUTPUT),
         ("fake-email-utf-16-le.eml", EXPECTED_OUTPUT),
+        ("fake-email-b64.eml", EXPECTED_OUTPUT),
         ("email-no-utf8-2008-07-16.062410.eml", None),
         ("email-no-utf8-2014-03-17.111517.eml", None),
         ("email-replace-mime-encodings-error-1.eml", None),
@@ -168,6 +173,7 @@ def test_partition_email_from_file():
         ("fake-email-utf-16.eml", EXPECTED_OUTPUT),
         ("fake-email-utf-16-be.eml", EXPECTED_OUTPUT),
         ("fake-email-utf-16-le.eml", EXPECTED_OUTPUT),
+        ("fake-email-b64.eml", EXPECTED_OUTPUT),
         ("email-no-utf8-2008-07-16.062410.eml", None),
         ("email-no-utf8-2014-03-17.111517.eml", None),
         ("email-replace-mime-encodings-error-1.eml", None),
@@ -323,7 +329,7 @@ def test_partition_email_from_filename_has_metadata():
         ).to_dict()
     )
     expected_dt = datetime.datetime.fromisoformat("2022-12-16T17:04:16-05:00")
-    assert elements[0].metadata.get_last_modified() == expected_dt
+    assert parse_optional_datetime(elements[0].metadata.last_modified) == expected_dt
     for element in elements:
         assert element.metadata.filename == "fake-email.eml"
 
@@ -338,6 +344,16 @@ def test_extract_email_text_matches_html():
     for i, element in enumerate(elements_from_text):
         assert element == elements_from_text[i]
         assert element.metadata.filename == "fake-email-attachment.eml"
+
+
+def test_extract_base64_email_text_matches_html():
+    filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-email-b64.eml")
+    elements_from_text = partition_email(filename=filename, content_source="text/plain")
+    elements_from_html = partition_email(filename=filename, content_source="text/html")
+    assert len(elements_from_text) == len(elements_from_html)
+    for i, element in enumerate(elements_from_text):
+        assert element == elements_from_text[i]
+        assert element.metadata.filename == "fake-email-b64.eml"
 
 
 def test_extract_attachment_info():
@@ -399,7 +415,7 @@ def test_partition_email_still_works_with_no_content():
 def test_partition_email_from_filename_exclude_metadata():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-email-header.eml")
     elements = partition_email(filename=filename, include_metadata=False)
-    assert elements[0].metadata.get_last_modified() is None
+    assert parse_optional_datetime(elements[0].metadata.last_modified) is None
     assert elements[0].metadata.filetype is None
     assert elements[0].metadata.page_name is None
     assert elements[0].metadata.filename is None
@@ -413,7 +429,7 @@ def test_partition_email_from_text_file_exclude_metadata():
             content_source="text/plain",
             include_metadata=False,
         )
-    assert elements[0].metadata.get_last_modified() is None
+    assert parse_optional_datetime(elements[0].metadata.last_modified) is None
     assert elements[0].metadata.filetype is None
     assert elements[0].metadata.page_name is None
     assert elements[0].metadata.filename is None
@@ -423,7 +439,7 @@ def test_partition_email_from_file_exclude_metadata():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-email.eml")
     with open(filename) as f:
         elements = partition_email(file=f, include_metadata=False)
-    assert elements[0].metadata.get_last_modified() is None
+    assert parse_optional_datetime(elements[0].metadata.last_modified) is None
     assert elements[0].metadata.filetype is None
     assert elements[0].metadata.page_name is None
     assert elements[0].metadata.filename is None

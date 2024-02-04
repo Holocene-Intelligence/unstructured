@@ -5,18 +5,14 @@ import click
 
 from unstructured.ingest.cli.base.src import BaseSrcCmd
 from unstructured.ingest.cli.interfaces import (
-    CliMixin,
+    CliConfig,
     DelimitedString,
 )
-from unstructured.ingest.interfaces import BaseConfig
+from unstructured.ingest.connector.discord import SimpleDiscordConfig
 
 
 @dataclass
-class DiscordCliConfig(BaseConfig, CliMixin):
-    channels: t.List[str]
-    token: str
-    period: t.Optional[int] = None
-
+class DiscordCliConfig(SimpleDiscordConfig, CliConfig):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
         options = [
@@ -35,6 +31,7 @@ class DiscordCliConfig(BaseConfig, CliMixin):
             click.Option(
                 ["--period"],
                 default=None,
+                type=click.IntRange(0),
                 help="Number of days to go back in the history of "
                 "discord channels, must be a number",
             ),
@@ -43,5 +40,8 @@ class DiscordCliConfig(BaseConfig, CliMixin):
 
 
 def get_base_src_cmd() -> BaseSrcCmd:
-    cmd_cls = BaseSrcCmd(cmd_name="discord", cli_config=DiscordCliConfig)
+    cmd_cls = BaseSrcCmd(
+        cmd_name="discord",
+        cli_config=DiscordCliConfig,
+    )
     return cmd_cls

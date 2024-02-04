@@ -5,19 +5,13 @@ import click
 
 from unstructured.ingest.cli.base.src import BaseSrcCmd
 from unstructured.ingest.cli.interfaces import (
-    CliMixin,
+    CliConfig,
 )
-from unstructured.ingest.interfaces import BaseConfig
+from unstructured.ingest.connector.biomed import SimpleBiomedConfig
 
 
 @dataclass
-class BiomedCliConfig(BaseConfig, CliMixin):
-    api_id: t.Optional[str] = None
-    api_from: t.Optional[str] = None
-    api_until: t.Optional[str] = None
-    path: t.Optional[str] = None
-    max_request_time: int = 45
-
+class BiomedCliConfig(SimpleBiomedConfig, CliConfig):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
         options = [
@@ -51,5 +45,8 @@ class BiomedCliConfig(BaseConfig, CliMixin):
 
 
 def get_base_src_cmd() -> BaseSrcCmd:
-    cmd_cls = BaseSrcCmd(cmd_name="biomed", cli_config=BiomedCliConfig)
+    cmd_cls = BaseSrcCmd(
+        cmd_name="biomed",
+        cli_config=BiomedCliConfig,
+    )
     return cmd_cls

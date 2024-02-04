@@ -16,12 +16,12 @@ The Unstructured library offers a variety of different ways to preprocess docume
 * ``hi_res``: The "hi_res" strategy will identify the layout of the document using ``detectron2``. The advantage of “hi_res” is that it uses the document layout to gain additional information about document elements. We recommend using this strategy if your use case is highly sensitive to correct classifications for document elements.
 * ``ocr_only``: Leverage Optical Character Recognition to extract text from the image based files.
 
-**These strategies are available on the following partition bricks:**
+**These strategies are available on the following partition functions:**
 
 +-------------------------------------------+--------------------------------+----------------------------------------+----------------+------------------------------------------------------------------------------------------------------------------+
 | Document Type                             | Partition Function             | Strategies                             | Table Support  | Options                                                                                                          |
 +-------------------------------------------+--------------------------------+----------------------------------------+----------------+------------------------------------------------------------------------------------------------------------------+
-| Images (`.png`/`.jpg`)                    | `partition_image`              | "auto", "hi_res", "ocr_only"           | Yes            | Encoding; Include Page Breaks; Infer Table Structure; OCR Languages, Strategy                                    |
+| Images (`.png`/`.jpg`/`.heic`)            | `partition_image`              | "auto", "hi_res", "ocr_only"           | Yes            | Encoding; Include Page Breaks; Infer Table Structure; OCR Languages, Strategy                                    |
 +-------------------------------------------+--------------------------------+----------------------------------------+----------------+------------------------------------------------------------------------------------------------------------------+
 | PDFs (`.pdf`)                             | `partition_pdf`                | "auto", "fast", "hi_res", "ocr_only"   | Yes            | Encoding; Include Page Breaks; Infer Table Structure; Max Partition; OCR Languages, Strategy                     |
 +-------------------------------------------+--------------------------------+----------------------------------------+----------------+------------------------------------------------------------------------------------------------------------------+

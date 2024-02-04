@@ -1,11 +1,16 @@
-import os
 import typing as t
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from uuid import UUID
 
+import httpx
+
+from unstructured.ingest.enhanced_dataclass import enhanced_field
+from unstructured.ingest.error import SourceConnectionError
 from unstructured.ingest.interfaces import (
+    AccessConfig,
     BaseConnectorConfig,
-    BaseIngestDoc,
+    BaseSingleIngestDoc,
     BaseSourceConnector,
     IngestDocCleanupMixin,
     RetryStrategyConfig,
@@ -17,20 +22,34 @@ from unstructured.utils import (
 )
 
 NOTION_API_VERSION = "2022-06-28"
+if t.TYPE_CHECKING:
+    from unstructured.ingest.connector.notion.client import Client as NotionClient
+
+
+@dataclass
+class NotionAccessConfig(AccessConfig):
+    notion_api_key: str = enhanced_field(sensitive=True)
 
 
 @dataclass
 class SimpleNotionConfig(BaseConnectorConfig):
     """Connector config to process all messages by channel id's."""
 
-    page_ids: t.List[str]
-    database_ids: t.List[str]
-    recursive: bool
-    notion_api_key: str
+    access_config: NotionAccessConfig
+    page_ids: t.Optional[t.List[str]] = None
+    database_ids: t.Optional[t.List[str]] = None
+    recursive: bool = False
+
+    def __post_init__(self):
+        if self.page_ids:
+            self.page_ids = [str(UUID(p.strip())) for p in self.page_ids]
+
+        if self.database_ids:
+            self.database_ids = [str(UUID(d.strip())) for d in self.database_ids]
 
 
 @dataclass
-class NotionPageIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
+class NotionPageIngestDoc(IngestDocCleanupMixin, BaseSingleIngestDoc):
     """Class encapsulating fetching a doc and writing processed results (but not
     doing the processing!).
 
@@ -39,7 +58,6 @@ class NotionPageIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
     """
 
     page_id: str
-    api_key: str
     connector_config: SimpleNotionConfig
     registry_name: str = "notion_page"
     retry_strategy_config: t.Optional[RetryStrategyConfig] = None
@@ -63,13 +81,13 @@ class NotionPageIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         # Pin the version of the api to avoid schema changes
         return NotionClient(
             notion_version=NOTION_API_VERSION,
-            auth=self.api_key,
+            auth=self.connector_config.access_config.notion_api_key,
             logger=logger,
             log_level=logger.level,
             retry_strategy_config=self.retry_strategy_config,
         )
 
-    @BaseIngestDoc.skip_if_file_exists
+    @BaseSingleIngestDoc.skip_if_file_exists
     @requires_dependencies(dependencies=["notion_client"], extras="notion")
     def get_file(self):
         from notion_client import APIErrorCode, APIResponseError
@@ -77,8 +95,6 @@ class NotionPageIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         from unstructured.ingest.connector.notion.helpers import extract_page_html
 
         self._create_full_tmp_dir_path()
-
-        logger.debug(f"fetching page {self.page_id} - PID: {os.getpid()}")
 
         client = self.get_client()
 
@@ -153,7 +169,7 @@ class NotionPageIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
 
 
 @dataclass
-class NotionDatabaseIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
+class NotionDatabaseIngestDoc(IngestDocCleanupMixin, BaseSingleIngestDoc):
     """Class encapsulating fetching a doc and writing processed results (but not
     doing the processing!).
 
@@ -162,7 +178,6 @@ class NotionDatabaseIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
     """
 
     database_id: str
-    api_key: str
     connector_config: SimpleNotionConfig
     retry_strategy_config: t.Optional[RetryStrategyConfig] = None
     registry_name: str = "notion_database"
@@ -186,13 +201,13 @@ class NotionDatabaseIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         # Pin the version of the api to avoid schema changes
         return NotionClient(
             notion_version=NOTION_API_VERSION,
-            auth=self.api_key,
+            auth=self.connector_config.access_config.notion_api_key,
             logger=logger,
             log_level=logger.level,
             retry_strategy_config=self.retry_strategy_config,
         )
 
-    @BaseIngestDoc.skip_if_file_exists
+    @BaseSingleIngestDoc.skip_if_file_exists
     @requires_dependencies(dependencies=["notion_client"], extras="notion")
     def get_file(self):
         from notion_client import APIErrorCode, APIResponseError
@@ -200,8 +215,6 @@ class NotionDatabaseIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         from unstructured.ingest.connector.notion.helpers import extract_database_html
 
         self._create_full_tmp_dir_path()
-
-        logger.debug(f"fetching database {self.database_id} - PID: {os.getpid()}")
 
         client = self.get_client()
 
@@ -277,27 +290,45 @@ class NotionDatabaseIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         return self._tmp_download_file()
 
 
-@requires_dependencies(dependencies=["notion_client"], extras="notion")
 @dataclass
 class NotionSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
     """Objects of this class support fetching document(s) from"""
 
     connector_config: SimpleNotionConfig
     retry_strategy_config: t.Optional[RetryStrategyConfig] = None
+    _client: t.Optional["NotionClient"] = field(init=False, default=None)
+
+    @property
+    def client(self) -> "NotionClient":
+        if self._client is None:
+            self._client = self.create_client()
+        return self._client
 
     @requires_dependencies(dependencies=["notion_client"], extras="notion")
-    def initialize(self):
-        """Verify that can get metadata for an object, validates connections info."""
+    def create_client(self) -> "NotionClient":
         from unstructured.ingest.connector.notion.client import Client as NotionClient
 
-        # Pin the version of the api to avoid schema changes
-        self.client = NotionClient(
+        return NotionClient(
             notion_version=NOTION_API_VERSION,
-            auth=self.connector_config.notion_api_key,
+            auth=self.connector_config.access_config.notion_api_key,
             logger=logger,
             log_level=logger.level,
             retry_strategy_config=self.retry_strategy_config,
         )
+
+    def check_connection(self):
+        try:
+            request = self.client._build_request("HEAD", "users")
+            response = self.client.client.send(request)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as http_error:
+            logger.error(f"failed to validate connection: {http_error}", exc_info=True)
+            raise SourceConnectionError(f"failed to validate connection: {http_error}")
+
+    @requires_dependencies(dependencies=["notion_client"], extras="notion")
+    def initialize(self):
+        """Verify that can get metadata for an object, validates connections info."""
+        _ = self.client
 
     @requires_dependencies(dependencies=["notion_client"], extras="notion")
     def get_child_page_content(self, page_id: str):
@@ -352,7 +383,7 @@ class NotionSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
         return child_content
 
     def get_ingest_docs(self):
-        docs: t.List[BaseIngestDoc] = []
+        docs: t.List[BaseSingleIngestDoc] = []
         if self.connector_config.page_ids:
             docs += [
                 NotionPageIngestDoc(
@@ -361,7 +392,6 @@ class NotionSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
                     retry_strategy_config=self.retry_strategy_config,
                     read_config=self.read_config,
                     page_id=page_id,
-                    api_key=self.connector_config.notion_api_key,
                 )
                 for page_id in self.connector_config.page_ids
             ]
@@ -373,7 +403,6 @@ class NotionSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
                     retry_strategy_config=self.retry_strategy_config,
                     read_config=self.read_config,
                     database_id=database_id,
-                    api_key=self.connector_config.notion_api_key,
                 )
                 for database_id in self.connector_config.database_ids
             ]
@@ -381,24 +410,28 @@ class NotionSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
             logger.info("Getting recursive content")
             child_pages = []
             child_databases = []
-            for page_id in self.connector_config.page_ids:
-                child_content = self.get_child_page_content(page_id=page_id)
-                child_pages.extend(child_content.child_pages)
-                child_databases.extend(child_content.child_databases)
+            if self.connector_config.page_ids:
+                for page_id in self.connector_config.page_ids:
+                    child_content = self.get_child_page_content(page_id=page_id)
+                    child_pages.extend(child_content.child_pages)
+                    child_databases.extend(child_content.child_databases)
 
-            for database_id in self.connector_config.database_ids:
-                child_content = self.get_child_database_content(database_id=database_id)
-                child_pages.extend(child_content.child_pages)
-                child_databases.extend(child_content.child_databases)
+            if self.connector_config.database_ids:
+                for database_id in self.connector_config.database_ids:
+                    child_content = self.get_child_database_content(database_id=database_id)
+                    child_pages.extend(child_content.child_pages)
+                    child_databases.extend(child_content.child_databases)
 
             # Remove duplicates
             child_pages = list(set(child_pages))
-            child_pages = [c for c in child_pages if c not in self.connector_config.page_ids]
+            if self.connector_config.page_ids:
+                child_pages = [c for c in child_pages if c not in self.connector_config.page_ids]
 
             child_databases = list(set(child_databases))
-            child_databases = [
-                db for db in child_databases if db not in self.connector_config.database_ids
-            ]
+            if self.connector_config.database_ids:
+                child_databases = [
+                    db for db in child_databases if db not in self.connector_config.database_ids
+                ]
 
             if child_pages:
                 logger.info(
@@ -411,7 +444,6 @@ class NotionSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
                         retry_strategy_config=self.retry_strategy_config,
                         read_config=self.read_config,
                         page_id=page_id,
-                        api_key=self.connector_config.notion_api_key,
                     )
                     for page_id in child_pages
                 ]
@@ -429,7 +461,6 @@ class NotionSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
                         retry_strategy_config=self.retry_strategy_config,
                         read_config=self.read_config,
                         database_id=database_id,
-                        api_key=self.connector_config.notion_api_key,
                     )
                     for database_id in child_databases
                 ]

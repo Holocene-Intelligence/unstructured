@@ -1,13 +1,16 @@
-import os
 import typing as t
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import requests
+
+from unstructured.ingest.enhanced_dataclass import enhanced_field
 from unstructured.ingest.error import SourceConnectionError, SourceConnectionNetworkError
 from unstructured.ingest.interfaces import (
+    AccessConfig,
     BaseConnectorConfig,
-    BaseIngestDoc,
+    BaseSingleIngestDoc,
     BaseSourceConnector,
     IngestDocCleanupMixin,
     SourceConnectorCleanupMixin,
@@ -15,6 +18,14 @@ from unstructured.ingest.interfaces import (
 )
 from unstructured.ingest.logger import logger
 from unstructured.utils import requires_dependencies
+
+if t.TYPE_CHECKING:
+    from pyairtable import Api
+
+
+@dataclass
+class AirtableAccessConfig(AccessConfig):
+    personal_access_token: str = enhanced_field(sensitive=True)
 
 
 @dataclass
@@ -26,8 +37,8 @@ class SimpleAirtableConfig(BaseConnectorConfig):
     for more info on authentication.
     """
 
-    personal_access_token: str
-    list_of_paths: t.Optional[str]
+    access_config: AirtableAccessConfig
+    list_of_paths: t.Optional[str] = None
 
 
 @dataclass
@@ -41,7 +52,7 @@ class AirtableTableMeta:
 
 
 @dataclass
-class AirtableIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
+class AirtableIngestDoc(IngestDocCleanupMixin, BaseSingleIngestDoc):
     """Class encapsulating fetching a doc and writing processed results (but not
     doing the processing).
 
@@ -83,7 +94,7 @@ class AirtableIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
     def _query_table(self):
         from pyairtable import Api
 
-        api = Api(self.connector_config.personal_access_token)
+        api = Api(self.connector_config.access_config.personal_access_token)
         table = api.table(self.table_meta.base_id, self.table_meta.table_id)
         table_url = table.url
         rows = table.all(
@@ -130,11 +141,10 @@ class AirtableIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
 
     @SourceConnectionError.wrap
     @requires_dependencies(["pandas"])
-    @BaseIngestDoc.skip_if_file_exists
+    @BaseSingleIngestDoc.skip_if_file_exists
     def get_file(self):
         import pandas as pd
 
-        logger.debug(f"Fetching {self} - PID: {os.getpid()}")
         rows, table_url = self._get_table_rows()
         self.update_source_metadata(rows_tuple=(rows, table_url))
         if rows is None:
@@ -200,6 +210,24 @@ class AirtableSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
     """Fetches tables or views from an Airtable org."""
 
     connector_config: SimpleAirtableConfig
+    _api: t.Optional["Api"] = field(init=False, default=None)
+
+    @property
+    def api(self):
+        if self._api is None:
+            self._api = Api(self.connector_config.access_config.personal_access_token)
+        return self._api
+
+    @api.setter
+    def api(self, api: "Api"):
+        self._api = api
+
+    def check_connection(self):
+        try:
+            self.api.request(method="HEAD", url=self.api.build_url("meta", "bases"))
+        except requests.HTTPError as http_error:
+            logger.error(f"failed to validate connection: {http_error}", exc_info=True)
+            raise SourceConnectionError(f"failed to validate connection: {http_error}")
 
     @requires_dependencies(["pyairtable"], extras="airtable")
     def initialize(self):
@@ -209,7 +237,7 @@ class AirtableSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
         if self.connector_config.list_of_paths:
             self.list_of_paths = self.connector_config.list_of_paths.split()
 
-        self.api = Api(self.connector_config.personal_access_token)
+        self.api = Api(self.connector_config.access_config.personal_access_token)
 
     @requires_dependencies(["pyairtable"], extras="airtable")
     def use_all_bases(self):

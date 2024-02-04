@@ -5,19 +5,14 @@ import click
 
 from unstructured.ingest.cli.base.src import BaseSrcCmd
 from unstructured.ingest.cli.interfaces import (
-    CliMixin,
+    CliConfig,
     DelimitedString,
 )
-from unstructured.ingest.interfaces import BaseConfig
+from unstructured.ingest.connector.slack import SimpleSlackConfig
 
 
 @dataclass
-class SlackCliConfig(BaseConfig, CliMixin):
-    token: str
-    channels: t.List[str]
-    start_date: t.Optional[str] = None
-    end_date: t.Optional[str] = None
-
+class SlackCliConfig(SimpleSlackConfig, CliConfig):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
         options = [
@@ -54,5 +49,8 @@ class SlackCliConfig(BaseConfig, CliMixin):
 
 
 def get_base_src_cmd() -> BaseSrcCmd:
-    cmd_cls = BaseSrcCmd(cmd_name="slack", cli_config=SlackCliConfig)
+    cmd_cls = BaseSrcCmd(
+        cmd_name="slack",
+        cli_config=SlackCliConfig,
+    )
     return cmd_cls

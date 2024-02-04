@@ -5,18 +5,15 @@ import click
 
 from unstructured.ingest.cli.base.src import BaseSrcCmd
 from unstructured.ingest.cli.interfaces import (
-    CliMixin,
+    CliConfig,
     CliRecursiveConfig,
+    FileOrJson,
 )
-from unstructured.ingest.interfaces import BaseConfig
+from unstructured.ingest.connector.google_drive import SimpleGoogleDriveConfig
 
 
 @dataclass
-class GoogleDriveCliConfig(BaseConfig, CliMixin):
-    drive_id: str
-    service_account_key: str
-    extension: t.Optional[str] = None
-
+class GoogleDriveCliConfig(SimpleGoogleDriveConfig, CliConfig):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
         options = [
@@ -29,8 +26,9 @@ class GoogleDriveCliConfig(BaseConfig, CliMixin):
             click.Option(
                 ["--service-account-key"],
                 required=True,
-                type=str,
-                help="Path to the Google Drive service account json file.",
+                type=FileOrJson(),
+                help="Either the file path of the credentials file to use or a json string of "
+                "those values to use for authentication",
             ),
             click.Option(
                 ["--extension"],

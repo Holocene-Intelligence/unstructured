@@ -10,24 +10,24 @@ CONTAINER_NAME=unstructured-smoke-test
 DOCKER_IMAGE="${DOCKER_IMAGE:-unstructured:dev}"
 
 # Change to the root of the repository
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 cd "$SCRIPT_DIR"/.. || exit 1
 
 start_container() {
-    echo Starting container "$CONTAINER_NAME"
-    docker run -dt --rm --name "$CONTAINER_NAME" "$DOCKER_IMAGE"
+  echo Starting container "$CONTAINER_NAME"
+  docker run -dt --rm --name "$CONTAINER_NAME" "$DOCKER_IMAGE"
 }
 
 await_container() {
-    echo Waiting for container to start
-    until [ "$(docker inspect -f '{{.State.Status}}' $CONTAINER_NAME)" == "running" ]; do
-        sleep 1
-    done
+  echo Waiting for container to start
+  until [ "$(docker inspect -f '{{.State.Status}}' $CONTAINER_NAME)" == "running" ]; do
+    sleep 1
+  done
 }
 
 stop_container() {
-    echo Stopping container "$CONTAINER_NAME"
-    docker stop "$CONTAINER_NAME"
+  echo Stopping container "$CONTAINER_NAME"
+  docker stop "$CONTAINER_NAME"
 }
 
 start_container
@@ -40,7 +40,7 @@ await_container
 # Run the tests
 docker cp test_unstructured_ingest $CONTAINER_NAME:/home/notebook-user
 docker exec -u root "$CONTAINER_NAME" /bin/bash -c "chown -R 1000:1000 /home/notebook-user/test_unstructured_ingest"
-docker exec "$CONTAINER_NAME" /bin/bash -c "/home/notebook-user/test_unstructured_ingest/test-ingest-wikipedia.sh"
+docker exec "$CONTAINER_NAME" /bin/bash -c "/home/notebook-user/test_unstructured_ingest/src/wikipedia.sh"
 
 result=$?
 exit $result

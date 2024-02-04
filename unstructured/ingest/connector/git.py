@@ -1,13 +1,14 @@
 import fnmatch
-import os
 import typing as t
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from unstructured.ingest.enhanced_dataclass import enhanced_field
 from unstructured.ingest.error import SourceConnectionError
 from unstructured.ingest.interfaces import (
+    AccessConfig,
     BaseConnectorConfig,
-    BaseIngestDoc,
+    BaseSingleIngestDoc,
     BaseSourceConnector,
     IngestDocCleanupMixin,
     SourceConnectorCleanupMixin,
@@ -16,16 +17,23 @@ from unstructured.ingest.logger import logger
 
 
 @dataclass
+class GitAccessConfig(AccessConfig):
+    access_token: t.Optional[str] = enhanced_field(
+        default=None, sensitive=True, overload_name="git_access_token"
+    )
+
+
+@dataclass
 class SimpleGitConfig(BaseConnectorConfig):
     url: str
-    access_token: t.Optional[str]
-    branch: t.Optional[str]
-    file_glob: t.Optional[str]
+    access_config: GitAccessConfig
+    branch: t.Optional[str] = enhanced_field(default=None, overload_name="git_branch")
+    file_glob: t.Optional[t.List[str]] = enhanced_field(default=None, overload_name="git_file_glob")
     repo_path: str = field(init=False, repr=False)
 
 
 @dataclass
-class GitIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
+class GitIngestDoc(IngestDocCleanupMixin, BaseSingleIngestDoc):
     connector_config: SimpleGitConfig = field(repr=False)
     path: str
 
@@ -55,11 +63,10 @@ class GitIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         raise NotImplementedError()
 
     @SourceConnectionError.wrap
-    @BaseIngestDoc.skip_if_file_exists
+    @BaseSingleIngestDoc.skip_if_file_exists
     def get_file(self):
         """Fetches the "remote" doc and stores it locally on the filesystem."""
         self._create_full_tmp_dir_path()
-        logger.debug(f"Fetching {self} - PID: {os.getpid()}")
         self._fetch_and_write()
 
     def _fetch_content(self) -> None:
@@ -76,7 +83,11 @@ class GitSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
     def initialize(self):
         pass
 
-    def is_file_type_supported(self, path: str) -> bool:
+    def check_connection(self):
+        pass
+
+    @staticmethod
+    def is_file_type_supported(path: str) -> bool:
         # Workaround to ensure that auto.partition isn't fed with .yaml, .py, etc. files
         # TODO: What to do with no filenames? e.g. LICENSE, Makefile, etc.
         supported = path.endswith(
@@ -87,6 +98,7 @@ class GitSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
                 ".doc",
                 ".docx",
                 ".eml",
+                ".heic",
                 ".html",
                 ".png",
                 ".jpg",
@@ -104,7 +116,7 @@ class GitSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
     def does_path_match_glob(self, path: str) -> bool:
         if not self.connector_config.file_glob:
             return True
-        patterns = self.connector_config.file_glob.split(",")
+        patterns = self.connector_config.file_glob
         for pattern in patterns:
             if fnmatch.filter([path], pattern):
                 return True

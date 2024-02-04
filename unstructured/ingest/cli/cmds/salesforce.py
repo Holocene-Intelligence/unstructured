@@ -5,20 +5,15 @@ import click
 
 from unstructured.ingest.cli.base.src import BaseSrcCmd
 from unstructured.ingest.cli.interfaces import (
-    CliMixin,
+    CliConfig,
     CliRecursiveConfig,
     DelimitedString,
 )
-from unstructured.ingest.interfaces import BaseConfig
+from unstructured.ingest.connector.salesforce import SimpleSalesforceConfig
 
 
 @dataclass
-class SalesforceCliConfig(BaseConfig, CliMixin):
-    username: str
-    consumer_key: str
-    private_key_path: str
-    categories: t.List[str]
-
+class SalesforceCliConfig(SimpleSalesforceConfig, CliConfig):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
         possible_categories = ["Account", "Case", "Campaign", "EmailMessage", "Lead"]
@@ -36,11 +31,11 @@ class SalesforceCliConfig(BaseConfig, CliMixin):
                 help="For the Salesforce JWT auth. Found in Consumer Details.",
             ),
             click.Option(
-                ["--private-key-path"],
+                ["--private-key"],
                 required=True,
-                type=click.Path(file_okay=True, exists=True, dir_okay=False),
-                help="Path to the private key for the Salesforce JWT auth. "
-                "Usually named server.key.",
+                type=str,
+                help="Path to the private key or its contents for the Salesforce JWT auth. "
+                "Key file is usually named server.key.",
             ),
             click.Option(
                 ["--categories"],

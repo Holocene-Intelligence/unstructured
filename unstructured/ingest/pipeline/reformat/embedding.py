@@ -37,9 +37,9 @@ class Embedder(ReformatNode):
             ).hexdigest()[:32]
             json_filename = f"{hashed_filename}.json"
             json_path = (Path(self.get_path()) / json_filename).resolve()
-            self.pipeline_context.ingest_docs_map[
-                hashed_filename
-            ] = self.pipeline_context.ingest_docs_map[filename]
+            self.pipeline_context.ingest_docs_map[hashed_filename] = (
+                self.pipeline_context.ingest_docs_map[filename]
+            )
             if (
                 not self.pipeline_context.reprocess
                 and json_path.is_file()
@@ -58,7 +58,7 @@ class Embedder(ReformatNode):
         except Exception as e:
             if self.pipeline_context.raise_on_error:
                 raise
-            logger.error(f"failed to chunk content from file {elements_json}, {e}", exc_info=True)
+            logger.error(f"failed to embed content from file {elements_json}, {e}", exc_info=True)
             return None
 
     def get_path(self) -> Path:

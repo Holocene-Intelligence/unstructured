@@ -37,21 +37,21 @@ class Chunker(ReformatNode):
             ).hexdigest()[:32]
             json_filename = f"{hashed_filename}.json"
             json_path = (Path(self.get_path()) / json_filename).resolve()
-            self.pipeline_context.ingest_docs_map[
-                hashed_filename
-            ] = self.pipeline_context.ingest_docs_map[filename]
+            self.pipeline_context.ingest_docs_map[hashed_filename] = (
+                self.pipeline_context.ingest_docs_map[filename]
+            )
             if (
                 not self.pipeline_context.reprocess
                 and json_path.is_file()
                 and json_path.stat().st_size
             ):
-                logger.debug(f"File exists: {json_path}, skipping embedding")
+                logger.debug(f"File exists: {json_path}, skipping chunking")
                 return str(json_path)
             elements = elements_from_json(filename=elements_json)
             chunked_elements = self.chunking_config.chunk(elements=elements)
             elements_dict = convert_to_dict(chunked_elements)
             with open(json_path, "w", encoding="utf8") as output_f:
-                logger.info(f"writing embeddings content to {json_path}")
+                logger.info(f"writing chunking content to {json_path}")
                 json.dump(elements_dict, output_f, ensure_ascii=False, indent=2)
             return str(json_path)
         except Exception as e:

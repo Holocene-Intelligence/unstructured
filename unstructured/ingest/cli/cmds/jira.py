@@ -5,21 +5,14 @@ import click
 
 from unstructured.ingest.cli.base.src import BaseSrcCmd
 from unstructured.ingest.cli.interfaces import (
-    CliMixin,
+    CliConfig,
     DelimitedString,
 )
-from unstructured.ingest.interfaces import BaseConfig
+from unstructured.ingest.connector.jira import SimpleJiraConfig
 
 
 @dataclass
-class JiraCliConfig(BaseConfig, CliMixin):
-    api_token: str
-    url: str
-    user_email: str
-    projects: t.Optional[t.List[str]] = None
-    boards: t.Optional[t.List[str]] = None
-    issues: t.Optional[t.List[str]] = None
-
+class JiraCliConfig(SimpleJiraConfig, CliConfig):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
         options = [
@@ -71,5 +64,8 @@ class JiraCliConfig(BaseConfig, CliMixin):
 
 
 def get_base_src_cmd() -> BaseSrcCmd:
-    cmd_cls = BaseSrcCmd(cmd_name="jira", cli_config=JiraCliConfig)
+    cmd_cls = BaseSrcCmd(
+        cmd_name="jira",
+        cli_config=JiraCliConfig,
+    )
     return cmd_cls

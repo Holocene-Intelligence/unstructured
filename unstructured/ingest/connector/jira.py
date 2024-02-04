@@ -1,17 +1,18 @@
 import math
-import os
 import typing as t
 from collections import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
 
-from unstructured.ingest.error import SourceConnectionError
+from unstructured.ingest.enhanced_dataclass import enhanced_field
+from unstructured.ingest.error import SourceConnectionError, SourceConnectionNetworkError
 from unstructured.ingest.interfaces import (
+    AccessConfig,
     BaseConnectorConfig,
-    BaseIngestDoc,
     BaseSessionHandle,
+    BaseSingleIngestDoc,
     BaseSourceConnector,
     ConfigSessionHandleMixin,
     IngestDocCleanupMixin,
@@ -67,6 +68,11 @@ def create_jira_object(url, user_email, api_token):
 
 
 @dataclass
+class JiraAccessConfig(AccessConfig):
+    api_token: str = enhanced_field(sensitive=True)
+
+
+@dataclass
 class SimpleJiraConfig(ConfigSessionHandleMixin, BaseConnectorConfig):
     """Connector config where:
     user_email is the email to authenticate into Atlassian (Jira) Cloud,
@@ -79,16 +85,18 @@ class SimpleJiraConfig(ConfigSessionHandleMixin, BaseConnectorConfig):
     """
 
     user_email: str
-    api_token: str
+    access_config: JiraAccessConfig
     url: str
-    projects: t.Optional[t.List[str]]
-    boards: t.Optional[t.List[str]]
-    issues: t.Optional[t.List[str]]
+    projects: t.Optional[t.List[str]] = None
+    boards: t.Optional[t.List[str]] = None
+    issues: t.Optional[t.List[str]] = None
 
     def create_session_handle(
         self,
     ) -> JiraSessionHandle:
-        service = create_jira_object(self.url, self.user_email, self.api_token)
+        service = create_jira_object(
+            url=self.url, user_email=self.user_email, api_token=self.access_config.api_token
+        )
         return JiraSessionHandle(service=service)
 
 
@@ -224,9 +232,9 @@ def scroll_wrapper(func, results_key="results"):
 
         for _ in range(num_iterations):
             response = func(*args, **kwargs)
-            if type(response) is list:
+            if isinstance(response, list):
                 all_results += func(*args, **kwargs)
-            elif type(response) is dict:
+            elif isinstance(response, dict):
                 if results_key not in response:
                     raise KeyError(
                         "Response object has no known keys to \
@@ -241,7 +249,7 @@ def scroll_wrapper(func, results_key="results"):
 
 
 @dataclass
-class JiraIngestDoc(IngestDocSessionHandleMixin, IngestDocCleanupMixin, BaseIngestDoc):
+class JiraIngestDoc(IngestDocSessionHandleMixin, IngestDocCleanupMixin, BaseSingleIngestDoc):
     """Class encapsulating fetching a doc and writing processed results (but not
     doing the processing).
 
@@ -250,7 +258,7 @@ class JiraIngestDoc(IngestDocSessionHandleMixin, IngestDocCleanupMixin, BaseInge
     """
 
     connector_config: SimpleJiraConfig
-    file_meta: JiraFileMeta
+    file_meta: t.Optional[JiraFileMeta] = None
     registry_name: str = "jira"
 
     @cached_property
@@ -263,6 +271,7 @@ class JiraIngestDoc(IngestDocSessionHandleMixin, IngestDocCleanupMixin, BaseInge
         }
 
     @cached_property
+    @SourceConnectionNetworkError.wrap
     def issue(self):
         """Gets issue data"""
         jira = self.session_handle.service
@@ -323,10 +332,8 @@ class JiraIngestDoc(IngestDocSessionHandleMixin, IngestDocCleanupMixin, BaseInge
 
     @SourceConnectionError.wrap
     @requires_dependencies(["atlassian"], extras="jira")
-    @BaseIngestDoc.skip_if_file_exists
+    @BaseSingleIngestDoc.skip_if_file_exists
     def get_file(self):
-        logger.debug(f"Fetching {self} - PID: {os.getpid()}")
-
         document = form_templated_string(self.issue, self.parsed_fields)
         self.update_source_metadata()
         self.filename.parent.mkdir(parents=True, exist_ok=True)
@@ -335,16 +342,29 @@ class JiraIngestDoc(IngestDocSessionHandleMixin, IngestDocCleanupMixin, BaseInge
             f.write(document)
 
 
-@requires_dependencies(["atlassian"], extras="jira")
 @dataclass
 class JiraSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
     """Fetches issues from projects in an Atlassian (Jira) Cloud instance."""
 
     connector_config: SimpleJiraConfig
+    _jira: t.Optional["Jira"] = field(init=False, default=None)
+
+    @property
+    def jira(self) -> "Jira":
+        if self._jira is None:
+            try:
+                self._jira = self.connector_config.create_session_handle().service
+            except Exception as e:
+                logger.error(f"failed to validate connection: {e}", exc_info=True)
+                raise SourceConnectionError(f"failed to validate connection: {e}")
+        return self._jira
 
     @requires_dependencies(["atlassian"], extras="jira")
     def initialize(self):
-        self.jira = self.connector_config.create_session_handle().service
+        _ = self.jira
+
+    def check_connection(self):
+        _ = self.jira
 
     @requires_dependencies(["atlassian"], extras="jira")
     def _get_all_project_ids(self):

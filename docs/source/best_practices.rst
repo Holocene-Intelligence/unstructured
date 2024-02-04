@@ -7,10 +7,11 @@ High-level overview of available strategies and models in ``Unstructured`` libra
 
 .. image:: imgs/strategy.png
   :width: 1000
-  :alt: Alternative text
+  :alt: strategy
 
 .. toctree::
    :maxdepth: 1
 
    best_practices/strategies
    best_practices/models
+   best_practices/table_extraction_pdf

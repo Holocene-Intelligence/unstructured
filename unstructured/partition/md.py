@@ -3,7 +3,7 @@ from typing import IO, List, Optional, Union
 import markdown
 import requests
 
-from unstructured.chunking.title import add_chunking_strategy
+from unstructured.chunking import add_chunking_strategy
 from unstructured.documents.elements import Element, process_metadata
 from unstructured.documents.xml import VALID_PARSERS
 from unstructured.file_utils.filetype import FileType, add_metadata_with_filetype
@@ -99,7 +99,7 @@ def partition_md(
 
         text = response.text
 
-    html = markdown.markdown(text)
+    html = markdown.markdown(text, extensions=["tables"])
 
     return partition_html(
         text=html,

@@ -1,0 +1,4 @@
+-c ../constraints.in
+-c ../base.txt
+hubspot-api-client
+urllib3

@@ -6,6 +6,8 @@ from typing import (
 )
 
 import requests
+from unstructured_client import UnstructuredClient
+from unstructured_client.models import shared
 
 from unstructured.documents.elements import Element
 from unstructured.logger import logger
@@ -63,40 +65,37 @@ def partition_via_api(
             "Please use metadata_filename instead.",
         )
 
-    headers = {
-        "ACCEPT": "application/json",
-        "UNSTRUCTURED-API-KEY": api_key,
-    }
+    # Note(austin) - the sdk takes the base url, but we have the full api_url
+    # For consistency, just strip off the path when it's given
+    base_url = api_url[:-19] if "/general/v0/general" in api_url else api_url
+    sdk = UnstructuredClient(api_key_auth=api_key, server_url=base_url)
 
     if filename is not None:
         with open(filename, "rb") as f:
-            files = [
-                ("files", (filename, f, content_type)),
-            ]
-            response = requests.post(
-                api_url,
-                headers=headers,
-                data=request_kwargs,
-                files=files,  # type: ignore
+            files = shared.Files(
+                content=f.read(),
+                file_name=filename,
             )
+
     elif file is not None:
         if metadata_filename is None:
             raise ValueError(
                 "If file is specified in partition_via_api, "
                 "metadata_filename must be specified as well.",
             )
-        files = [
-            ("files", (metadata_filename, file, content_type)),  # type: ignore
-        ]
-        response = requests.post(
-            api_url,
-            headers=headers,
-            data=request_kwargs,
-            files=files,  # type: ignore
+        files = shared.Files(
+            content=file,
+            file_name=metadata_filename,
         )
 
+    req = shared.PartitionParameters(
+        files=files,
+        **request_kwargs,
+    )
+    response = sdk.general.partition(req)
+
     if response.status_code == 200:
-        return elements_from_json(text=response.text)
+        return elements_from_json(text=response.raw_response.text)
     else:
         raise ValueError(
             f"Receive unexpected status code {response.status_code} from the API.",
@@ -113,7 +112,7 @@ def partition_multiple_via_api(
     metadata_filenames: Optional[List[str]] = None,
     **request_kwargs,
 ) -> List[List[Element]]:
-    """Partitions multiple document using the Unstructured REST API by batching
+    """Partitions multiple documents using the Unstructured REST API by batching
     the documents into a single HTTP request.
 
     See https://api.unstructured.io/general/docs for the hosted API documentation or

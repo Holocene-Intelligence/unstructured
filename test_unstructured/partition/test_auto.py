@@ -1,13 +1,16 @@
 import json
 import os
 import pathlib
+import tempfile
 import warnings
 from importlib import import_module
-from unittest.mock import ANY, patch
+from unittest.mock import Mock, patch
 
 import docx
 import pytest
+from PIL import Image
 
+from test_unstructured.partition.pdf_image.test_pdf import assert_element_extraction
 from test_unstructured.partition.test_constants import (
     EXPECTED_TABLE,
     EXPECTED_TABLE_XLSX,
@@ -31,6 +34,7 @@ from unstructured.file_utils.filetype import FILETYPE_TO_MIMETYPE, FileType
 from unstructured.partition import auto
 from unstructured.partition.auto import _get_partition_with_extras, partition
 from unstructured.partition.common import convert_office_doc
+from unstructured.partition.utils.constants import PartitionStrategy
 from unstructured.staging.base import elements_to_json
 
 DIRECTORY = pathlib.Path(__file__).parent.resolve()
@@ -50,7 +54,7 @@ is_in_docker = os.path.exists("/.dockerenv")
 
 def test_auto_partition_email_from_filename():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, EML_TEST_FILE)
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert len(elements) > 0
     assert elements == EXPECTED_EMAIL_OUTPUT
     assert elements[0].metadata.filename == os.path.basename(filename)
@@ -60,7 +64,7 @@ def test_auto_partition_email_from_filename():
 def test_auto_partition_email_from_file():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, EML_TEST_FILE)
     with open(filename) as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
     assert len(elements) > 0
     assert elements == EXPECTED_EMAIL_OUTPUT
 
@@ -68,7 +72,7 @@ def test_auto_partition_email_from_file():
 def test_auto_partition_email_from_file_rb():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, EML_TEST_FILE)
     with open(filename, "rb") as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
     assert len(elements) > 0
     assert elements == EXPECTED_EMAIL_OUTPUT
 
@@ -111,7 +115,7 @@ def test_auto_partition_docx_with_filename(mock_docx_document, expected_docx_ele
     filename = os.path.join(tmpdir.dirname, "mock_document.docx")
     mock_docx_document.save(filename)
 
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert elements == expected_docx_elements
     assert elements[0].metadata.filename == os.path.basename(filename)
 
@@ -121,7 +125,7 @@ def test_auto_partition_docx_with_file(mock_docx_document, expected_docx_element
     mock_docx_document.save(filename)
 
     with open(filename, "rb") as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
     assert elements == expected_docx_elements
 
 
@@ -145,7 +149,7 @@ def test_auto_partition_doc_with_filename(
         filename=doc_filename,
         metadata_filename=metadata_filename,
         content_type=content_type,
-        strategy="hi_res",
+        strategy=PartitionStrategy.HI_RES,
     )
     assert elements == expected_docx_elements
     assert elements[0].metadata.filename == "mock_document.doc"
@@ -162,7 +166,7 @@ def test_auto_partition_doc_with_file(mock_docx_document, expected_docx_elements
     convert_office_doc(docx_filename, tmpdir.dirname, "doc")
 
     with open(doc_filename, "rb") as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
     assert elements == expected_docx_elements
 
 
@@ -177,7 +181,7 @@ def test_auto_partition_html_from_filename(pass_metadata_filename, content_type)
         filename=filename,
         metadata_filename=metadata_filename,
         content_type=content_type,
-        strategy="hi_res",
+        strategy=PartitionStrategy.HI_RES,
     )
     assert len(elements) > 0
     assert elements[0].metadata.filename == os.path.basename(filename)
@@ -196,7 +200,7 @@ def test_auto_partition_html_from_file(pass_metadata_filename, content_type):
             file=f,
             metadata_filename=metadata_filename,
             content_type=content_type,
-            strategy="hi_res",
+            strategy=PartitionStrategy.HI_RES,
         )
     assert len(elements) > 0
 
@@ -204,7 +208,7 @@ def test_auto_partition_html_from_file(pass_metadata_filename, content_type):
 def test_auto_partition_html_from_file_rb():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-html.html")
     with open(filename, "rb") as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
     assert len(elements) > 0
 
 
@@ -220,7 +224,9 @@ def test_auto_partition_json_from_filename():
     )
     with open(filename) as json_f:
         json_data = json.load(json_f)
-    json_elems = json.loads(elements_to_json(partition(filename=filename, strategy="hi_res")))
+    json_elems = json.loads(
+        elements_to_json(partition(filename=filename, strategy=PartitionStrategy.HI_RES))
+    )
     for elem in json_elems:
         elem.pop("metadata")
     for elem in json_data:
@@ -257,7 +263,9 @@ def test_auto_partition_json_from_file():
     with open(filename) as json_f:
         json_data = json.load(json_f)
     with open(filename, encoding="utf-8") as partition_f:
-        json_elems = json.loads(elements_to_json(partition(file=partition_f, strategy="hi_res")))
+        json_elems = json.loads(
+            elements_to_json(partition(file=partition_f, strategy=PartitionStrategy.HI_RES))
+        )
     for elem in json_elems:
         # coordinates are always in the element data structures, even if None
         elem.pop("coordinates")
@@ -277,7 +285,7 @@ EXPECTED_TEXT_OUTPUT = [
 
 def test_auto_partition_text_from_filename():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-text.txt")
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert len(elements) > 0
     assert elements == EXPECTED_TEXT_OUTPUT
     assert elements[0].metadata.filename == os.path.basename(filename)
@@ -287,7 +295,7 @@ def test_auto_partition_text_from_filename():
 def test_auto_partition_text_from_file():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-text.txt")
     with open(filename) as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
     assert len(elements) > 0
     assert elements == EXPECTED_TEXT_OUTPUT
 
@@ -304,7 +312,7 @@ def test_auto_partition_pdf_from_filename(pass_metadata_filename, content_type, 
         filename=filename,
         metadata_filename=metadata_filename,
         content_type=content_type,
-        strategy="hi_res",
+        strategy=PartitionStrategy.HI_RES,
     )
 
     idx = 3
@@ -325,9 +333,9 @@ def test_auto_partition_pdf_from_filename(pass_metadata_filename, content_type, 
 def test_auto_partition_pdf_uses_table_extraction():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "layout-parser-paper-fast.pdf")
     with patch(
-        "unstructured.partition.ocr.process_file_with_ocr",
+        "unstructured.partition.pdf_image.ocr.process_file_with_ocr",
     ) as mock_process_file_with_model:
-        partition(filename, pdf_infer_table_structure=True, strategy="hi_res")
+        partition(filename, pdf_infer_table_structure=True, strategy=PartitionStrategy.HI_RES)
         assert mock_process_file_with_model.call_args[1]["infer_table_structure"]
 
 
@@ -338,19 +346,22 @@ def test_auto_partition_pdf_with_fast_strategy(monkeypatch):
     with patch.object(auto, "partition_pdf", return_value=mock_return) as mock_partition:
         mock_partition_with_extras_map = {"pdf": mock_partition}
         monkeypatch.setattr(auto, "PARTITION_WITH_EXTRAS_MAP", mock_partition_with_extras_map)
-        partition(filename=filename, strategy="fast")
+        partition(filename=filename, strategy=PartitionStrategy.FAST)
 
     mock_partition.assert_called_once_with(
         filename=filename,
-        metadata_filename=None,
         file=None,
         url=None,
+        strategy=PartitionStrategy.FAST,
+        languages=None,
+        metadata_filename=None,
         include_page_breaks=False,
         infer_table_structure=False,
-        extract_images_in_pdf=ANY,
-        image_output_dir_path=ANY,
-        strategy="fast",
-        languages=None,
+        extract_images_in_pdf=False,
+        extract_image_block_types=None,
+        extract_image_block_output_dir=None,
+        extract_image_block_to_payload=False,
+        hi_res_model_name=None,
     )
 
 
@@ -367,7 +378,7 @@ def test_auto_partition_pdf_from_file(pass_metadata_filename, content_type, requ
             file=f,
             metadata_filename=metadata_filename,
             content_type=content_type,
-            strategy="hi_res",
+            strategy=PartitionStrategy.HI_RES,
         )
 
     idx = 3
@@ -385,9 +396,9 @@ def test_auto_partition_pdf_from_file(pass_metadata_filename, content_type, requ
 def test_auto_partition_formats_languages_for_tesseract():
     filename = "example-docs/chi_sim_image.jpeg"
     with patch(
-        "unstructured.partition.ocr.process_file_with_ocr",
+        "unstructured.partition.pdf_image.ocr.process_file_with_ocr",
     ) as mock_process_file_with_ocr:
-        partition(filename, strategy="hi_res", languages=["zh"])
+        partition(filename, strategy=PartitionStrategy.HI_RES, languages=["zh"])
         _, kwargs = mock_process_file_with_ocr.call_args_list[0]
         assert "ocr_languages" in kwargs
         assert kwargs["ocr_languages"] == "chi_sim+chi_sim_vert+chi_tra+chi_tra_vert"
@@ -395,13 +406,28 @@ def test_auto_partition_formats_languages_for_tesseract():
 
 def test_auto_partition_element_metadata_user_provided_languages():
     filename = "example-docs/chevron-page.pdf"
-    elements = partition(filename=filename, strategy="ocr_only", languages=["eng"])
+    elements = partition(filename=filename, strategy=PartitionStrategy.OCR_ONLY, languages=["eng"])
+    assert elements[0].metadata.languages == ["eng"]
+
+
+@pytest.mark.parametrize(
+    ("languages", "ocr_languages"),
+    [(["auto"], ""), (["eng"], "")],
+)
+def test_auto_partition_ignores_empty_string_for_ocr_languages(languages, ocr_languages):
+    filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "book-war-and-peace-1p.txt")
+    elements = partition(
+        filename=filename,
+        strategy=PartitionStrategy.OCR_ONLY,
+        ocr_languages=ocr_languages,
+        languages=languages,
+    )
     assert elements[0].metadata.languages == ["eng"]
 
 
 def test_auto_partition_warns_with_ocr_languages(caplog):
     filename = "example-docs/chevron-page.pdf"
-    partition(filename=filename, strategy="hi_res", ocr_languages="eng")
+    partition(filename=filename, strategy=PartitionStrategy.HI_RES, ocr_languages="eng")
     assert "The ocr_languages kwarg will be deprecated" in caplog.text
 
 
@@ -413,28 +439,48 @@ def test_partition_pdf_doesnt_raise_warning():
     #      #additional-use-cases-of-warnings-in-tests
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        partition(filename=filename, strategy="hi_res")
+        partition(filename=filename, strategy=PartitionStrategy.HI_RES)
 
 
 @pytest.mark.parametrize(
     ("pass_metadata_filename", "content_type"),
     [(False, None), (False, "image/jpeg"), (True, "image/jpeg"), (True, None)],
 )
-def test_auto_partition_image_default_strategy_hi_res(pass_metadata_filename, content_type):
+def test_auto_partition_image(pass_metadata_filename, content_type):
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "layout-parser-paper-fast.jpg")
     metadata_filename = filename if pass_metadata_filename else None
     elements = partition(
         filename=filename,
         metadata_filename=metadata_filename,
         content_type=content_type,
-        strategy="auto",
+        strategy=PartitionStrategy.AUTO,
     )
 
     # should be same result as test_partition_image_default_strategy_hi_res() in test_image.py
     title = "LayoutParser: A Unified Toolkit for Deep Learning Based Document Image Analysis"
-    idx = 3
+    idx = 2
     assert elements[idx].text == title
     assert elements[idx].metadata.coordinates is not None
+
+
+@pytest.mark.parametrize("extract_image_block_to_payload", [False, True])
+def test_auto_partition_image_element_extraction(
+    extract_image_block_to_payload,
+    filename=os.path.join(EXAMPLE_DOCS_DIRECTORY, "embedded-images-tables.jpg"),
+):
+    extract_image_block_types = ["Image", "Table"]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        elements = partition(
+            filename=filename,
+            extract_image_block_types=extract_image_block_types,
+            extract_image_block_to_payload=extract_image_block_to_payload,
+            extract_image_block_output_dir=tmpdir,
+        )
+
+        assert_element_extraction(
+            elements, extract_image_block_types, extract_image_block_to_payload, tmpdir
+        )
 
 
 @pytest.mark.parametrize(
@@ -448,7 +494,7 @@ def test_auto_partition_jpg(pass_metadata_filename, content_type):
         filename=filename,
         metadata_filename=metadata_filename,
         content_type=content_type,
-        strategy="auto",
+        strategy=PartitionStrategy.AUTO,
     )
     assert len(elements) > 0
 
@@ -465,7 +511,7 @@ def test_auto_partition_jpg_from_file(pass_metadata_filename, content_type):
             file=f,
             metadata_filename=metadata_filename,
             content_type=content_type,
-            strategy="auto",
+            strategy=PartitionStrategy.AUTO,
         )
     assert len(elements) > 0
 
@@ -473,7 +519,7 @@ def test_auto_partition_jpg_from_file(pass_metadata_filename, content_type):
 def test_auto_partition_raises_with_bad_type(monkeypatch):
     monkeypatch.setattr(auto, "detect_filetype", lambda *args, **kwargs: None)
     with pytest.raises(ValueError):
-        partition(filename="made-up.fake", strategy="hi_res")
+        partition(filename="made-up.fake", strategy=PartitionStrategy.HI_RES)
 
 
 EXPECTED_PPTX_OUTPUT = [
@@ -488,7 +534,7 @@ EXPECTED_PPTX_OUTPUT = [
 
 def test_auto_partition_pptx_from_filename():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-power-point.pptx")
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert elements == EXPECTED_PPTX_OUTPUT
     assert elements[0].metadata.filename == os.path.basename(filename)
     assert elements[0].metadata.file_directory == os.path.split(filename)[0]
@@ -497,7 +543,7 @@ def test_auto_partition_pptx_from_filename():
 @pytest.mark.skipif(is_in_docker, reason="Skipping this test in Docker container")
 def test_auto_partition_ppt_from_filename():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-power-point.ppt")
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert elements == EXPECTED_PPTX_OUTPUT
     assert elements[0].metadata.filename == os.path.basename(filename)
     assert elements[0].metadata.file_directory == os.path.split(filename)[0]
@@ -505,13 +551,15 @@ def test_auto_partition_ppt_from_filename():
 
 def test_auto_with_page_breaks():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "layout-parser-paper-fast.pdf")
-    elements = partition(filename=filename, include_page_breaks=True, strategy="hi_res")
+    elements = partition(
+        filename=filename, include_page_breaks=True, strategy=PartitionStrategy.HI_RES
+    )
     assert "PageBreak" in [elem.category for elem in elements]
 
 
 def test_auto_partition_epub_from_filename():
     filename = os.path.join(DIRECTORY, "..", "..", "example-docs", "winter-sports.epub")
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert len(elements) > 0
     assert elements[0].text.startswith("The Project Gutenberg eBook of Winter Sports")
 
@@ -519,7 +567,7 @@ def test_auto_partition_epub_from_filename():
 def test_auto_partition_epub_from_file():
     filename = os.path.join(DIRECTORY, "..", "..", "example-docs", "winter-sports.epub")
     with open(filename, "rb") as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
     assert len(elements) > 0
     assert elements[0].text.startswith("The Project Gutenberg eBook of Winter Sports")
 
@@ -534,26 +582,26 @@ EXPECTED_MSG_OUTPUT = [
 
 def test_auto_partition_msg_from_filename():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-email.msg")
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert elements == EXPECTED_MSG_OUTPUT
 
 
 def test_auto_partition_rtf_from_filename():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake-doc.rtf")
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert elements[0] == Title("My First Heading")
 
 
 def test_auto_partition_from_url():
     url = "https://raw.githubusercontent.com/Unstructured-IO/unstructured/main/LICENSE.md"
-    elements = partition(url=url, content_type="text/plain", strategy="hi_res")
+    elements = partition(url=url, content_type="text/plain", strategy=PartitionStrategy.HI_RES)
     assert elements[0] == Title("Apache License")
     assert elements[0].metadata.url == url
 
 
 def test_partition_md_works_with_embedded_html():
     url = "https://raw.githubusercontent.com/Unstructured-IO/unstructured/main/README.md"
-    elements = partition(url=url, content_type="text/markdown", strategy="hi_res")
+    elements = partition(url=url, content_type="text/markdown", strategy=PartitionStrategy.HI_RES)
     elements[0].text
     unstructured_found = False
     for element in elements:
@@ -565,33 +613,35 @@ def test_partition_md_works_with_embedded_html():
 
 def test_auto_partition_warns_if_header_set_and_not_url(caplog):
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, EML_TEST_FILE)
-    partition(filename=filename, headers={"Accept": "application/pdf"}, strategy="hi_res")
+    partition(
+        filename=filename, headers={"Accept": "application/pdf"}, strategy=PartitionStrategy.HI_RES
+    )
     assert caplog.records[0].levelname == "WARNING"
 
 
 def test_auto_partition_works_with_unstructured_jsons():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "spring-weather.html.json")
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert elements[0].text == "News Around NOAA"
 
 
 def test_auto_partition_works_with_unstructured_jsons_from_file():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "spring-weather.html.json")
     with open(filename, "rb") as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
     assert elements[0].text == "News Around NOAA"
 
 
 def test_auto_partition_odt_from_filename():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake.odt")
-    elements = partition(filename=filename, strategy="hi_res")
+    elements = partition(filename=filename, strategy=PartitionStrategy.HI_RES)
     assert elements[0] == Title("Lorem ipsum dolor sit amet.")
 
 
 def test_auto_partition_odt_from_file():
     filename = os.path.join(EXAMPLE_DOCS_DIRECTORY, "fake.odt")
     with open(filename, "rb") as f:
-        elements = partition(file=f, strategy="hi_res")
+        elements = partition(file=f, strategy=PartitionStrategy.HI_RES)
 
     assert elements[0] == Title("Lorem ipsum dolor sit amet.")
 
@@ -639,6 +689,26 @@ def test_auto_filetype_overrides_file_specific(content_type, expected, monkeypat
     assert all(el.metadata.filetype == expected for el in elements)
 
 
+@pytest.mark.parametrize("extract_image_block_to_payload", [False, True])
+def test_auto_partition_pdf_element_extraction(
+    extract_image_block_to_payload,
+    filename=os.path.join(EXAMPLE_DOCS_DIRECTORY, "embedded-images-tables.pdf"),
+):
+    extract_image_block_types = ["Image", "Table"]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        elements = partition(
+            filename=filename,
+            extract_image_block_types=extract_image_block_types,
+            extract_image_block_to_payload=extract_image_block_to_payload,
+            extract_image_block_output_dir=tmpdir,
+        )
+
+        assert_element_extraction(
+            elements, extract_image_block_types, extract_image_block_to_payload, tmpdir
+        )
+
+
 supported_filetypes = [
     _
     for _ in FileType
@@ -654,6 +724,7 @@ supported_filetypes = [
 FILETYPE_TO_MODULE = {
     FileType.JPG: "image",
     FileType.PNG: "image",
+    FileType.HEIC: "image",
     FileType.TXT: "text",
     FileType.EML: "email",
 }
@@ -661,7 +732,7 @@ FILETYPE_TO_MODULE = {
 
 @pytest.mark.parametrize("filetype", supported_filetypes)
 def test_file_specific_produces_correct_filetype(filetype: FileType):
-    if filetype in (FileType.JPG, FileType.PNG, FileType.TIFF, FileType.EMPTY):
+    if filetype in auto.IMAGE_FILETYPES or filetype in (FileType.WAV, FileType.EMPTY):
         pytest.skip()
     extension = filetype.name.lower()
     filetype_module = (
@@ -1076,13 +1147,16 @@ def test_add_chunking_strategy_on_partition_auto_respects_max_chars():
     assert len(partitioned_table_elements_5_chars) != len(table_elements)
     assert len(partitioned_table_elements_200_chars) != len(table_elements)
 
-    assert len(partitioned_table_elements_5_chars[0].text) == 5
+    # trailing whitespace is stripped from the first chunk, leaving only a checkbox character
+    assert len(partitioned_table_elements_5_chars[0].text) == 1
+    # but the second chunk is the full 5 characters
+    assert len(partitioned_table_elements_5_chars[1].text) == 5
     assert len(partitioned_table_elements_5_chars[0].metadata.text_as_html) == 5
 
     # the first table element is under 200 chars so doesn't get chunked!
     assert table_elements[0] == partitioned_table_elements_200_chars[0]
     assert len(partitioned_table_elements_200_chars[0].text) < 200
-    assert len(partitioned_table_elements_200_chars[1].text) == 200
+    assert len(partitioned_table_elements_200_chars[1].text) == 198
     assert len(partitioned_table_elements_200_chars[1].metadata.text_as_html) == 200
 
 
@@ -1179,3 +1253,34 @@ def test_partition_languages_incorrectly_defaults_to_English(tmpdir):
         f.write(german)
     elements = partition(filepath)
     assert elements[0].metadata.languages == ["eng"]
+
+
+def test_partition_timeout_gets_routed():
+    class CallException(Exception):
+        pass
+
+    mock_ocr_func = Mock(side_effect=CallException("Function called!"))
+    with patch("unstructured.partition.auto.file_and_type_from_url", mock_ocr_func), pytest.raises(
+        CallException
+    ):
+        auto.partition(url="fake_url", request_timeout=326)
+    kwargs = mock_ocr_func.call_args.kwargs
+    assert "request_timeout" in kwargs
+    assert kwargs["request_timeout"] == 326
+
+
+def test_partition_image_with_bmp_with_auto(
+    tmpdir,
+    filename="example-docs/layout-parser-paper-with-table.jpg",
+):
+    bmp_filename = os.path.join(tmpdir.dirname, "example.bmp")
+    img = Image.open(filename)
+    img.save(bmp_filename)
+
+    elements = partition(
+        filename=bmp_filename,
+        strategy=PartitionStrategy.HI_RES,
+    )
+    table = [el.metadata.text_as_html for el in elements if el.metadata.text_as_html]
+    assert len(table) == 1
+    assert "<table><thead><th>" in table[0]

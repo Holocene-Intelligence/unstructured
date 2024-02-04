@@ -5,20 +5,13 @@ import click
 
 from unstructured.ingest.cli.base.src import BaseSrcCmd
 from unstructured.ingest.cli.interfaces import (
-    CliMixin,
+    CliConfig,
 )
-from unstructured.ingest.interfaces import BaseConfig
+from unstructured.ingest.connector.reddit import SimpleRedditConfig
 
 
 @dataclass
-class RedditCliConfig(BaseConfig, CliMixin):
-    client_id: str
-    client_secret: str
-    subreddit_name: str
-    user_agent: str
-    num_posts: int
-    search_query: t.Optional[str] = None
-
+class RedditCliConfig(SimpleRedditConfig, CliConfig):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
         options = [
@@ -67,5 +60,8 @@ class RedditCliConfig(BaseConfig, CliMixin):
 
 
 def get_base_src_cmd() -> BaseSrcCmd:
-    cmd_cls = BaseSrcCmd(cmd_name="reddit", cli_config=RedditCliConfig)
+    cmd_cls = BaseSrcCmd(
+        cmd_name="reddit",
+        cli_config=RedditCliConfig,
+    )
     return cmd_cls

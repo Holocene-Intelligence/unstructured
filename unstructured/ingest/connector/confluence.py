@@ -1,14 +1,17 @@
 import math
-import os
 import typing as t
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from unstructured.ingest.error import SourceConnectionError
+import requests
+
+from unstructured.ingest.enhanced_dataclass import enhanced_field
+from unstructured.ingest.error import SourceConnectionError, SourceConnectionNetworkError
 from unstructured.ingest.interfaces import (
+    AccessConfig,
     BaseConnectorConfig,
-    BaseIngestDoc,
+    BaseSingleIngestDoc,
     BaseSourceConnector,
     IngestDocCleanupMixin,
     SourceConnectorCleanupMixin,
@@ -16,6 +19,14 @@ from unstructured.ingest.interfaces import (
 )
 from unstructured.ingest.logger import logger
 from unstructured.utils import requires_dependencies
+
+if t.TYPE_CHECKING:
+    from atlassian import Confluence
+
+
+@dataclass
+class ConfluenceAccessConfig(AccessConfig):
+    api_token: str = enhanced_field(sensitive=True)
 
 
 @dataclass
@@ -30,10 +41,10 @@ class SimpleConfluenceConfig(BaseConnectorConfig):
     """
 
     user_email: str
-    api_token: str
+    access_config: ConfluenceAccessConfig
     url: str
-    max_number_of_spaces: int
-    max_number_of_docs_from_each_space: int
+    max_num_of_spaces: int = 500
+    max_num_of_docs_from_each_space: int = 100
     spaces: t.List[str] = field(default_factory=list)
 
 
@@ -62,9 +73,9 @@ def scroll_wrapper(func):
 
         for _ in range(num_iterations):
             response = func(*args, **kwargs)
-            if type(response) is list:
+            if isinstance(response, list):
                 all_results += func(*args, **kwargs)
-            elif type(response) is dict:
+            elif isinstance(response, dict):
                 all_results += func(*args, **kwargs)["results"]
 
             kwargs["start"] += kwargs["limit"]
@@ -75,7 +86,7 @@ def scroll_wrapper(func):
 
 
 @dataclass
-class ConfluenceIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
+class ConfluenceIngestDoc(IngestDocCleanupMixin, BaseSingleIngestDoc):
     """Class encapsulating fetching a doc and writing processed results (but not
     doing the processing).
 
@@ -111,6 +122,7 @@ class ConfluenceIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
             "page_id": self.document_meta.document_id,
         }
 
+    @SourceConnectionNetworkError.wrap
     @requires_dependencies(["atlassian"], extras="Confluence")
     def _get_page(self):
         from atlassian import Confluence
@@ -120,7 +132,7 @@ class ConfluenceIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
             confluence = Confluence(
                 self.connector_config.url,
                 username=self.connector_config.user_email,
-                password=self.connector_config.api_token,
+                password=self.connector_config.access_config.api_token,
             )
             result = confluence.get_page_by_id(
                 page_id=self.document_meta.document_id,
@@ -162,10 +174,8 @@ class ConfluenceIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
 
     @SourceConnectionError.wrap
     @requires_dependencies(["atlassian"], extras="confluence")
-    @BaseIngestDoc.skip_if_file_exists
+    @BaseSingleIngestDoc.skip_if_file_exists
     def get_file(self):
-        logger.debug(f"Fetching {self} - PID: {os.getpid()}")
-
         # TODO: instead of having a separate connection object for each doc,
         # have a separate connection object for each process
 
@@ -184,21 +194,35 @@ class ConfluenceSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector
     """Fetches body fields from all documents within all spaces in a Confluence Cloud instance."""
 
     connector_config: SimpleConfluenceConfig
+    _confluence: t.Optional["Confluence"] = field(init=False, default=None)
+
+    @property
+    def confluence(self) -> "Confluence":
+        from atlassian import Confluence
+
+        if self._confluence is None:
+            self._confluence = Confluence(
+                url=self.connector_config.url,
+                username=self.connector_config.user_email,
+                password=self.connector_config.access_config.api_token,
+            )
+        return self._confluence
+
+    @requires_dependencies(["atlassian"], extras="Confluence")
+    def check_connection(self):
+        url = "rest/api/space"
+        try:
+            self.confluence.request(method="HEAD", path=url)
+        except requests.HTTPError as http_error:
+            logger.error(f"failed to validate connection: {http_error}", exc_info=True)
+            raise SourceConnectionError(f"failed to validate connection: {http_error}")
 
     @requires_dependencies(["atlassian"], extras="Confluence")
     def initialize(self):
-        from atlassian import Confluence
-
-        self.confluence = Confluence(
-            url=self.connector_config.url,
-            username=self.connector_config.user_email,
-            password=self.connector_config.api_token,
-        )
-
         self.list_of_spaces = None
         if self.connector_config.spaces:
             self.list_of_spaces = self.connector_config.spaces
-            if self.connector_config.max_number_of_spaces:
+            if self.connector_config.max_num_of_spaces:
                 logger.warning(
                     """--confluence-list-of-spaces and --confluence-num-of-spaces cannot
                     be used at the same time. Connector will only fetch the
@@ -212,7 +236,7 @@ class ConfluenceSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector
         get_spaces_with_scroll = scroll_wrapper(self.confluence.get_all_spaces)
 
         all_results = get_spaces_with_scroll(
-            number_of_items_to_fetch=self.connector_config.max_number_of_spaces,
+            number_of_items_to_fetch=self.connector_config.max_num_of_spaces,
         )
 
         space_ids = [space["key"] for space in all_results]
@@ -227,7 +251,7 @@ class ConfluenceSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector
         get_pages_with_scroll = scroll_wrapper(self.confluence.get_all_pages_from_space)
         results = get_pages_with_scroll(
             space=space_id,
-            number_of_items_to_fetch=self.connector_config.max_number_of_docs_from_each_space,
+            number_of_items_to_fetch=self.connector_config.max_num_of_docs_from_each_space,
             content_type=content_type,
         )
 

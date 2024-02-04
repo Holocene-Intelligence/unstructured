@@ -6,10 +6,12 @@ from dataclasses import dataclass, field
 from itertools import chain
 from pathlib import Path
 
-from unstructured.ingest.error import SourceConnectionError
+from unstructured.ingest.enhanced_dataclass import enhanced_field
+from unstructured.ingest.error import SourceConnectionError, SourceConnectionNetworkError
 from unstructured.ingest.interfaces import (
+    AccessConfig,
     BaseConnectorConfig,
-    BaseIngestDoc,
+    BaseSingleIngestDoc,
     BaseSourceConnector,
     IngestDocCleanupMixin,
     SourceConnectorCleanupMixin,
@@ -19,6 +21,8 @@ from unstructured.ingest.logger import logger
 from unstructured.utils import requires_dependencies
 
 MAX_NUM_EMAILS = 1000000  # Maximum number of emails per folder
+if t.TYPE_CHECKING:
+    from office365.graph_client import GraphClient
 
 
 class MissingFolderError(Exception):
@@ -26,23 +30,28 @@ class MissingFolderError(Exception):
 
 
 @dataclass
+class OutlookAccessConfig(AccessConfig):
+    client_credential: str = enhanced_field(repr=False, sensitive=True, overload_name="client_cred")
+
+
+@dataclass
 class SimpleOutlookConfig(BaseConnectorConfig):
     """This class is getting the token."""
 
-    client_id: t.Optional[str]
-    client_credential: t.Optional[str] = field(repr=False)
+    access_config: OutlookAccessConfig
     user_email: str
-    tenant: t.Optional[str] = field(repr=False)
-    authority_url: t.Optional[str] = field(repr=False)
-    ms_outlook_folders: t.List[str]
+    client_id: str
+    tenant: t.Optional[str] = field(repr=False, default="common")
+    authority_url: t.Optional[str] = field(repr=False, default="https://login.microsoftonline.com")
+    outlook_folders: t.List[str] = field(default_factory=list)
     recursive: bool = False
     registry_name: str = "outlook"
 
     def __post_init__(self):
-        if not (self.client_id and self.client_credential and self.user_email):
+        if not (self.client_id and self.access_config.client_credential and self.user_email):
             raise ValueError(
                 "Please provide one of the following mandatory values:"
-                "\n--client_id\n--client_cred\n--user-email",
+                "\nclient_id\nclient_cred\nuser_email",
             )
         self.token_factory = self._acquire_token
 
@@ -54,7 +63,7 @@ class SimpleOutlookConfig(BaseConnectorConfig):
             app = ConfidentialClientApplication(
                 authority=f"{self.authority_url}/{self.tenant}",
                 client_id=self.client_id,
-                client_credential=self.client_credential,
+                client_credential=self.access_config.client_credential,
             )
             token = app.acquire_token_for_client(
                 scopes=["https://graph.microsoft.com/.default"],
@@ -72,7 +81,7 @@ class SimpleOutlookConfig(BaseConnectorConfig):
 
 
 @dataclass
-class OutlookIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
+class OutlookIngestDoc(IngestDocCleanupMixin, BaseSingleIngestDoc):
     connector_config: SimpleOutlookConfig
     message_id: str
     registry_name: str = "outlook"
@@ -139,13 +148,20 @@ class OutlookIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
             exists=True,
         )
 
+    @SourceConnectionNetworkError.wrap
+    def _run_download(self, local_file):
+        client = self.connector_config._get_client()
+        client.users[self.connector_config.user_email].messages[self.message_id].download(
+            local_file,
+        ).execute_query()
+
     @SourceConnectionError.wrap
-    @BaseIngestDoc.skip_if_file_exists
+    @BaseSingleIngestDoc.skip_if_file_exists
     @requires_dependencies(["office365"], extras="outlook")
     def get_file(self):
         """Relies on Office365 python sdk message object to do the download."""
         try:
-            client = self.connector_config._get_client()
+            self.connector_config._get_client()
             self.update_source_metadata()
             if not self.download_dir.is_dir():
                 logger.debug(f"Creating directory: {self.download_dir}")
@@ -158,9 +174,7 @@ class OutlookIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
                 ),
                 "wb",
             ) as local_file:
-                client.users[self.connector_config.user_email].messages[self.message_id].download(
-                    local_file,
-                ).execute_query()
+                self._run_download(local_file=local_file)
 
         except Exception as e:
             logger.error(
@@ -175,10 +189,26 @@ class OutlookIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
 @dataclass
 class OutlookSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
     connector_config: SimpleOutlookConfig
+    _client: t.Optional["GraphClient"] = field(init=False, default=None)
+
+    @property
+    def client(self) -> "GraphClient":
+        if self._client is None:
+            self._client = self.connector_config._get_client()
+        return self._client
 
     def initialize(self):
-        self.client = self.connector_config._get_client()
-        self.get_folder_ids()
+        try:
+            self.get_folder_ids()
+        except Exception as e:
+            raise SourceConnectionError(f"failed to validate connection: {e}")
+
+    def check_connection(self):
+        try:
+            _ = self.client
+        except Exception as e:
+            logger.error(f"failed to validate connection: {e}", exc_info=True)
+            raise SourceConnectionError(f"failed to validate connection: {e}")
 
     def recurse_folders(self, folder_id, main_folder_dict):
         """We only get a count of subfolders for any folder.
@@ -218,14 +248,14 @@ class OutlookSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
                 [
                     v
                     for k, v in self.root_folders.items()
-                    if k.lower() in [x.lower() for x in self.connector_config.ms_outlook_folders]
+                    if k.lower() in [x.lower() for x in self.connector_config.outlook_folders]
                 ],
             ),
         )
         if not self.selected_folder_ids:
             raise MissingFolderError(
                 "There are no root folders with the names: "
-                f"{self.connector_config.ms_outlook_folders}",
+                f"{self.connector_config.outlook_folders}",
             )
 
     def get_ingest_docs(self):

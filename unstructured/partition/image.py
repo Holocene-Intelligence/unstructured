@@ -1,14 +1,14 @@
 from typing import List, Optional
 
-from unstructured.chunking.title import add_chunking_strategy
+from unstructured.chunking import add_chunking_strategy
 from unstructured.documents.elements import Element, process_metadata
 from unstructured.file_utils.filetype import add_metadata
-from unstructured.logger import logger
 from unstructured.partition.common import exactly_one
 from unstructured.partition.lang import (
-    convert_old_ocr_languages_to_languages,
+    check_language_args,
 )
 from unstructured.partition.pdf import partition_pdf_or_image
+from unstructured.partition.utils.constants import PartitionStrategy
 
 
 @process_metadata()
@@ -20,10 +20,15 @@ def partition_image(
     include_page_breaks: bool = False,
     infer_table_structure: bool = False,
     ocr_languages: Optional[str] = None,
-    languages: Optional[List[str]] = ["eng"],
-    strategy: str = "hi_res",
+    languages: Optional[List[str]] = None,
+    strategy: str = PartitionStrategy.HI_RES,
     metadata_last_modified: Optional[str] = None,
     chunking_strategy: Optional[str] = None,
+    hi_res_model_name: Optional[str] = None,
+    extract_images_in_pdf: bool = False,
+    extract_image_block_types: Optional[List[str]] = None,
+    extract_image_block_output_dir: Optional[str] = None,
+    extract_image_block_to_payload: bool = False,
     **kwargs,
 ) -> List[Element]:
     """Parses an image into a list of interpreted elements.
@@ -54,30 +59,34 @@ def partition_image(
         The default strategy is `hi_res`.
     metadata_last_modified
         The last modified date for the document.
+    hi_res_model_name
+        The layout detection model used when partitioning strategy is set to `hi_res`.
+    extract_images_in_pdf
+        Only applicable if `strategy=hi_res`.
+        If True, any detected images will be saved in the path specified by
+        'extract_image_block_output_dir' or stored as base64 encoded data within metadata fields.
+        Deprecation Note: This parameter is marked for deprecation. Future versions will use
+        'extract_image_block_types' for broader extraction capabilities.
+    extract_image_block_types
+        Only applicable if `strategy=hi_res`.
+        Images of the element type(s) specified in this list (e.g., ["Image", "Table"]) will be
+        saved in the path specified by 'extract_image_block_output_dir' or stored as base64 encoded
+        data within metadata fields.
+    extract_image_block_to_payload
+        Only applicable if `strategy=hi_res`.
+        If True, images of the element type(s) defined in 'extract_image_block_types' will be
+        encoded as base64 data and stored in two metadata fields: 'image_base64' and
+        'image_mime_type'.
+        This parameter facilitates the inclusion of element data directly within the payload,
+        especially for web-based applications or APIs.
+    extract_image_block_output_dir
+        Only applicable if `strategy=hi_res` and `extract_image_block_to_payload=False`.
+        The filesystem path for saving images of the element type(s)
+        specified in 'extract_image_block_types'.
     """
     exactly_one(filename=filename, file=file)
 
-    if languages is None:
-        languages = ["eng"]
-
-    if not isinstance(languages, list):
-        raise TypeError(
-            'The language parameter must be a list of language codes as strings, ex. ["eng"]',
-        )
-
-    if ocr_languages is not None:
-        if languages != ["eng"]:
-            raise ValueError(
-                "Only one of languages and ocr_languages should be specified. "
-                "languages is preferred. ocr_languages is marked for deprecation.",
-            )
-
-        else:
-            languages = convert_old_ocr_languages_to_languages(ocr_languages)
-            logger.warning(
-                "The ocr_languages kwarg will be deprecated in a future version of unstructured. "
-                "Please use languages instead.",
-            )
+    languages = check_language_args(languages or [], ocr_languages) or ["eng"]
 
     return partition_pdf_or_image(
         filename=filename,
@@ -88,5 +97,10 @@ def partition_image(
         languages=languages,
         strategy=strategy,
         metadata_last_modified=metadata_last_modified,
+        hi_res_model_name=hi_res_model_name,
+        extract_images_in_pdf=extract_images_in_pdf,
+        extract_image_block_types=extract_image_block_types,
+        extract_image_block_output_dir=extract_image_block_output_dir,
+        extract_image_block_to_payload=extract_image_block_to_payload,
         **kwargs,
     )

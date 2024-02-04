@@ -7,7 +7,7 @@ from unstructured.ingest.connector.git import (
     GitSourceConnector,
     SimpleGitConfig,
 )
-from unstructured.ingest.error import SourceConnectionError
+from unstructured.ingest.error import SourceConnectionError, SourceConnectionNetworkError
 from unstructured.ingest.interfaces import SourceMetadata
 from unstructured.ingest.logger import logger
 from unstructured.utils import requires_dependencies
@@ -17,7 +17,7 @@ if t.TYPE_CHECKING:
 
 
 @dataclass
-class SimpleGitLabConfig(SimpleGitConfig):
+class SimpleGitlabConfig(SimpleGitConfig):
     base_url: str = "https://gitlab.com"
 
     def __post_init__(self):
@@ -34,13 +34,13 @@ class SimpleGitLabConfig(SimpleGitConfig):
     def get_project(self) -> "Project":
         from gitlab import Gitlab
 
-        gitlab = Gitlab(self.base_url, private_token=self.access_token)
+        gitlab = Gitlab(self.base_url, private_token=self.access_config.access_token)
         return gitlab.projects.get(self.repo_path)
 
 
 @dataclass
 class GitLabIngestDoc(GitIngestDoc):
-    connector_config: SimpleGitLabConfig
+    connector_config: SimpleGitlabConfig
     registry_name: str = "gitlab"
 
     @property
@@ -55,6 +55,7 @@ class GitLabIngestDoc(GitIngestDoc):
     def source_url(self) -> t.Optional[str]:
         return None
 
+    @SourceConnectionNetworkError.wrap
     @requires_dependencies(["gitlab"], extras="gitlab")
     def _fetch_content(self):
         from gitlab.exceptions import GitlabHttpError
@@ -97,10 +98,24 @@ class GitLabIngestDoc(GitIngestDoc):
             f.write(contents)
 
 
-@requires_dependencies(["gitlab"], extras="gitlab")
 @dataclass
 class GitLabSourceConnector(GitSourceConnector):
-    connector_config: SimpleGitLabConfig
+    connector_config: SimpleGitlabConfig
+
+    @requires_dependencies(["gitlab"], extras="gitlab")
+    def check_connection(self):
+        from gitlab import Gitlab
+        from gitlab.exceptions import GitlabError
+
+        try:
+            gitlab = Gitlab(
+                self.connector_config.base_url,
+                private_token=self.connector_config.access_config.access_token,
+            )
+            gitlab.auth()
+        except GitlabError as gitlab_error:
+            logger.error(f"failed to validate connection: {gitlab_error}", exc_info=True)
+            raise SourceConnectionError(f"failed to validate connection: {gitlab_error}")
 
     def get_ingest_docs(self):
         # Load the Git tree with all files, and then create Ingest docs

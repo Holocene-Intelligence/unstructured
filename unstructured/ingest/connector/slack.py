@@ -1,14 +1,15 @@
-import os
 import typing as t
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from unstructured.ingest.error import SourceConnectionError
+from unstructured.ingest.enhanced_dataclass import enhanced_field
+from unstructured.ingest.error import SourceConnectionError, SourceConnectionNetworkError
 from unstructured.ingest.interfaces import (
+    AccessConfig,
     BaseConnectorConfig,
-    BaseIngestDoc,
+    BaseSingleIngestDoc,
     BaseSourceConnector,
     IngestDocCleanupMixin,
     SourceConnectorCleanupMixin,
@@ -24,23 +25,28 @@ DATE_FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z")
 
 
 @dataclass
+class SlackAccessConfig(AccessConfig):
+    token: str = enhanced_field(sensitive=True)
+
+
+@dataclass
 class SimpleSlackConfig(BaseConnectorConfig):
     """Connector config to process all messages by channel id's."""
 
+    access_config: SlackAccessConfig
     channels: t.List[str]
-    token: str
-    oldest: t.Optional[str]
-    latest: t.Optional[str]
+    start_date: t.Optional[str] = None
+    end_date: t.Optional[str] = None
 
     def validate_inputs(self):
         oldest_valid = True
         latest_valid = True
 
-        if self.oldest:
-            oldest_valid = validate_date_args(self.oldest)
+        if self.start_date:
+            oldest_valid = validate_date_args(self.start_date)
 
-        if self.latest:
-            latest_valid = validate_date_args(self.latest)
+        if self.end_date:
+            latest_valid = validate_date_args(self.end_date)
 
         return oldest_valid, latest_valid
 
@@ -53,7 +59,7 @@ class SimpleSlackConfig(BaseConnectorConfig):
 
 
 @dataclass
-class SlackIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
+class SlackIngestDoc(IngestDocCleanupMixin, BaseSingleIngestDoc):
     """Class encapsulating fetching a doc and writing processed results (but not
     doing the processing!).
 
@@ -63,9 +69,6 @@ class SlackIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
 
     connector_config: SimpleSlackConfig
     channel: str
-    token: str
-    oldest: t.Optional[str]
-    latest: t.Optional[str]
     registry_name: str = "slack"
 
     # NOTE(crag): probably doesn't matter,  but intentionally not defining tmp_download_file
@@ -91,29 +94,25 @@ class SlackIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
     def _create_full_tmp_dir_path(self):
         self._tmp_download_file().parent.mkdir(parents=True, exist_ok=True)
 
+    @SourceConnectionNetworkError.wrap
     @requires_dependencies(dependencies=["slack_sdk"], extras="slack")
     def _fetch_messages(self):
         from slack_sdk import WebClient
-        from slack_sdk.errors import SlackApiError
 
-        self.client = WebClient(token=self.token)
-        try:
-            oldest = "0"
-            latest = "0"
-            if self.oldest:
-                oldest = self.convert_datetime(self.oldest)
+        self.client = WebClient(token=self.connector_config.access_config.token)
+        oldest = "0"
+        latest = "0"
+        if self.connector_config.start_date:
+            oldest = self.convert_datetime(self.connector_config.start_date)
 
-            if self.latest:
-                latest = self.convert_datetime(self.latest)
+        if self.connector_config.end_date:
+            latest = self.convert_datetime(self.connector_config.end_date)
 
-            result = self.client.conversations_history(
-                channel=self.channel,
-                oldest=oldest,
-                latest=latest,
-            )
-        except SlackApiError as e:
-            logger.error(e)
-            return None
+        result = self.client.conversations_history(
+            channel=self.channel,
+            oldest=oldest,
+            latest=latest,
+        )
         return result
 
     def update_source_metadata(self, **kwargs):
@@ -140,7 +139,7 @@ class SlackIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         )
 
     @SourceConnectionError.wrap
-    @BaseIngestDoc.skip_if_file_exists
+    @BaseSingleIngestDoc.skip_if_file_exists
     @requires_dependencies(dependencies=["slack_sdk"], extras="slack")
     def get_file(self):
         from slack_sdk.errors import SlackApiError
@@ -148,9 +147,6 @@ class SlackIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         """Fetches the data from a slack channel and stores it locally."""
 
         self._create_full_tmp_dir_path()
-
-        if self.processor_config.verbose:
-            logger.debug(f"fetching channel {self.channel} - PID: {os.getpid()}")
 
         result = self._fetch_messages()
         self.update_source_metadata(result=result)
@@ -196,11 +192,22 @@ class SlackIngestDoc(IngestDocCleanupMixin, BaseIngestDoc):
         return self._tmp_download_file()
 
 
-@requires_dependencies(dependencies=["slack_sdk"], extras="slack")
 class SlackSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
     """Objects of this class support fetching document(s) from"""
 
     connector_config: SimpleSlackConfig
+
+    @requires_dependencies(dependencies=["slack_sdk"], extras="slack")
+    def check_connection(self):
+        from slack_sdk import WebClient
+        from slack_sdk.errors import SlackClientError
+
+        try:
+            client = WebClient(token=self.connector_config.access_config.token)
+            client.users_identity()
+        except SlackClientError as slack_error:
+            logger.error(f"failed to validate connection: {slack_error}", exc_info=True)
+            raise SourceConnectionError(f"failed to validate connection: {slack_error}")
 
     def initialize(self):
         """Verify that can get metadata for an object, validates connections info."""
@@ -212,9 +219,6 @@ class SlackSourceConnector(SourceConnectorCleanupMixin, BaseSourceConnector):
                 processor_config=self.processor_config,
                 read_config=self.read_config,
                 channel=channel,
-                token=self.connector_config.token,
-                oldest=self.connector_config.oldest,
-                latest=self.connector_config.latest,
             )
             for channel in self.connector_config.channels
         ]

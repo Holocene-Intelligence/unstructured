@@ -36,7 +36,7 @@ install-huggingface:
 	python3 -m pip install pip==${PIP_VERSION}
 	python3 -m pip install -r requirements/huggingface.txt
 
-.PHONE: install-nltk-models
+.PHONY: install-nltk-models
 install-nltk-models:
 	python -c "import nltk; nltk.download('punkt')"
 	python -c "import nltk; nltk.download('averaged_perceptron_tagger')"
@@ -112,84 +112,92 @@ install-all-ingest:
 
 .PHONY: install-ingest-google-drive
 install-ingest-google-drive:
-	python3 -m pip install -r requirements/ingest-google-drive.txt
+	python3 -m pip install -r requirements/ingest/google-drive.txt
 
 ## install-ingest-s3:       install requirements for the s3 connector
 .PHONY: install-ingest-s3
 install-ingest-s3:
-	python3 -m pip install -r requirements/ingest-s3.txt
+	python3 -m pip install -r requirements/ingest/s3.txt
 
 .PHONY: install-ingest-gcs
 install-ingest-gcs:
-	python3 -m pip install -r requirements/ingest-gcs.txt
+	python3 -m pip install -r requirements/ingest/gcs.txt
 
 .PHONY: install-ingest-dropbox
 install-ingest-dropbox:
-	python3 -m pip install -r requirements/ingest-dropbox.txt
+	python3 -m pip install -r requirements/ingest/dropbox.txt
 
 .PHONY: install-ingest-azure
 install-ingest-azure:
-	python3 -m pip install -r requirements/ingest-azure.txt
+	python3 -m pip install -r requirements/ingest/azure.txt
 
 .PHONY: install-ingest-box
 install-ingest-box:
-	python3 -m pip install -r requirements/ingest-box.txt
+	python3 -m pip install -r requirements/ingest/box.txt
 
 .PHONY: install-ingest-delta-table
 install-ingest-delta-table:
-	python3 -m pip install -r requirements/ingest-delta-table.txt
+	python3 -m pip install -r requirements/ingest/delta-table.txt
 
 .PHONY: install-ingest-discord
 install-ingest-discord:
-	pip install -r requirements/ingest-discord.txt
+	pip install -r requirements/ingest/discord.txt
 
 .PHONY: install-ingest-github
 install-ingest-github:
-	python3 -m pip install -r requirements/ingest-github.txt
+	python3 -m pip install -r requirements/ingest/github.txt
 
 .PHONY: install-ingest-biomed
 install-ingest-biomed:
-	python3 -m pip install -r requirements/ingest-biomed.txt
+	python3 -m pip install -r requirements/ingest/biomed.txt
 
 .PHONY: install-ingest-gitlab
 install-ingest-gitlab:
-	python3 -m pip install -r requirements/ingest-gitlab.txt
+	python3 -m pip install -r requirements/ingest/gitlab.txt
 
 .PHONY: install-ingest-onedrive
 install-ingest-onedrive:
-	python3 -m pip install -r requirements/ingest-onedrive.txt
+	python3 -m pip install -r requirements/ingest/onedrive.txt
 
 .PHONY: install-ingest-outlook
 install-ingest-outlook:
-	python3 -m pip install -r requirements/ingest-outlook.txt
+	python3 -m pip install -r requirements/ingest/outlook.txt
 
 .PHONY: install-ingest-reddit
 install-ingest-reddit:
-	python3 -m pip install -r requirements/ingest-reddit.txt
+	python3 -m pip install -r requirements/ingest/reddit.txt
 
 .PHONY: install-ingest-slack
 install-ingest-slack:
-	pip install -r requirements/ingest-slack.txt
+	pip install -r requirements/ingest/slack.txt
 
 .PHONY: install-ingest-wikipedia
 install-ingest-wikipedia:
-	python3 -m pip install -r requirements/ingest-wikipedia.txt
+	python3 -m pip install -r requirements/ingest/wikipedia.txt
 
 .PHONY: install-ingest-elasticsearch
 install-ingest-elasticsearch:
-	python3 -m pip install -r requirements/ingest-elasticsearch.txt
+	python3 -m pip install -r requirements/ingest/elasticsearch.txt
+
+.PHONY: install-ingest-opensearch
+install-ingest-opensearch:
+	python3 -m pip install -r requirements/ingest/opensearch.txt
 
 .PHONY: install-ingest-confluence
 install-ingest-confluence:
-	python3 -m pip install -r requirements/ingest-confluence.txt
+	python3 -m pip install -r requirements/ingest/confluence.txt
 
 .PHONY: install-ingest-airtable
 install-ingest-airtable:
-	python3 -m pip install -r requirements/ingest-airtable.txt
+	python3 -m pip install -r requirements/ingest/airtable.txt
 
 .PHONY: install-ingest-sharepoint
 install-ingest-sharepoint:
-	python3 -m pip install -r requirements/ingest-sharepoint.txt
+	python3 -m pip install -r requirements/ingest/sharepoint.txt
+
+.PHONY: install-ingest-weaviate
+install-ingest-weaviate:
+	python3 -m pip install -r requirements/ingest/weaviate.txt
 
 .PHONY: install-ingest-local
 install-ingest-local:
@@ -197,23 +205,55 @@ install-ingest-local:
 
 .PHONY: install-ingest-notion
 install-ingest-notion:
-	python3 -m pip install -r requirements/ingest-notion.txt
+	python3 -m pip install -r requirements/ingest/notion.txt
 
 .PHONY: install-ingest-salesforce
 install-ingest-salesforce:
-	python3 -m pip install -r requirements/ingest-salesforce.txt
+	python3 -m pip install -r requirements/ingest/salesforce.txt
 
 .PHONY: install-ingest-jira
 install-ingest-jira:
-	python3 -m pip install -r requirements/ingest-jira.txt
+	python3 -m pip install -r requirements/ingest/jira.txt
+
+.PHONY: install-ingest-hubspot
+install-ingest-hubspot:
+	python3 -m pip install -r requirements/ingest/hubspot.txt
+
+.PHONY: install-ingest-sftp
+install-ingest-sftp:
+	python3 -m pip install -r requirements/ingest/sftp.txt
+
+.PHONY: install-ingest-pinecone
+install-ingest-pinecone:
+	python3 -m pip install -r requirements/ingest/pinecone.txt
+
+.PHONY: install-ingest-qdrant
+install-ingest-qdrant:
+	python3 -m pip install -r requirements/ingest/qdrant.txt
+
+.PHONY: install-ingest-chroma
+install-ingest-chroma:
+	python3 -m pip install -r requirements/ingest/chroma.txt
+
+.PHONY: install-ingest-postgres
+install-ingest-postgres:
+	python3 -m pip install -r requirements/ingest/postgres.txt
+
+.PHONY: install-ingest-mongodb
+install-ingest-mongodb:
+	python3 -m pip install -r requirements/ingest/mongodb.txt
+
+.PHONY: install-ingest-databricks-volumes
+install-ingest-databricks-volumes:
+	python3 -m pip install -r requirements/ingest/databricks-volumes.txt
 
 .PHONY: install-embed-huggingface
 install-embed-huggingface:
-	python3 -m pip install -r requirements/embed-huggingface.txt
+	python3 -m pip install -r requirements/ingest/embed-huggingface.txt
 
 .PHONY: install-unstructured-inference
 install-unstructured-inference:
-	python3 -m pip install -r requirements/local-inference.txt
+	python3 -m pip install -r requirements/ingest/local-inference.txt
 
 ## install-local-inference: installs requirements for local inference
 .PHONY: install-local-inference
@@ -231,8 +271,6 @@ install-paddleocr:
 .PHONY: pip-compile
 pip-compile:
 	@scripts/pip-compile.sh
-
-
 
 ## install-project-local:   install unstructured into your local python environment
 .PHONY: install-project-local
@@ -256,7 +294,12 @@ export UNSTRUCTURED_INCLUDE_DEBUG_METADATA ?= false
 .PHONY: test
 test:
 	PYTHONPATH=. CI=$(CI) \
-	UNSTRUCTURED_INCLUDE_DEBUG_METADATA=$(UNSTRUCTURED_INCLUDE_DEBUG_METADATA) pytest test_${PACKAGE_NAME} --cov=${PACKAGE_NAME} --cov-report term-missing
+	UNSTRUCTURED_INCLUDE_DEBUG_METADATA=$(UNSTRUCTURED_INCLUDE_DEBUG_METADATA) pytest test_${PACKAGE_NAME} -m "not chipper" --cov=${PACKAGE_NAME} --cov-report term-missing --durations=40
+
+.PHONY: test-chipper
+test-chipper:
+	PYTHONPATH=. CI=$(CI) \
+	UNSTRUCTURED_INCLUDE_DEBUG_METADATA=$(UNSTRUCTURED_INCLUDE_DEBUG_METADATA) pytest test_${PACKAGE_NAME} -m "chipper" --cov=${PACKAGE_NAME} --cov-report term-missing --durations=40
 
 .PHONY: test-unstructured-api-unit
 test-unstructured-api-unit:
@@ -324,7 +367,11 @@ test-extra-xlsx:
 
 ## check:                   runs linters (includes tests)
 .PHONY: check
-check: check-ruff check-black check-flake8 check-version
+check: check-ruff check-black check-flake8 check-version check-flake8-print
+
+.PHONY: check-shfmt
+check-shfmt:
+	shfmt -i 2 -d .
 
 .PHONY: check-black
 check-black:
@@ -334,9 +381,15 @@ check-black:
 check-flake8:
 	flake8 .
 
+# Check for print statements in ingest since anything going to console should be using the ingest logger
+# as it has a built in filter to redact sensitive information
+.PHONY: check-flake8-print
+check-flake8-print:
+	flake8 --per-file-ignores "" ./unstructured/ingest
+
 .PHONY: check-ruff
 check-ruff:
-	ruff . --select I,UP015,UP032,UP034,UP018,COM,C4,PT,SIM,PLR0402 --ignore COM812,PT011,PT012,SIM117
+	ruff . --select C4,COM,E,F,I,PLR0402,PT,SIM,UP015,UP018,UP032,UP034 --ignore COM812,PT011,PT012,SIM117
 
 .PHONY: check-autoflake
 check-autoflake:
@@ -357,8 +410,15 @@ check-version:
 
 ## tidy:                    run black
 .PHONY: tidy
-tidy:
-	ruff . --select I,UP015,UP032,UP034,UP018,COM,C4,PT,SIM,PLR0402 --fix-only || true
+tidy: tidy-python
+
+.PHONY: tidy_shell
+tidy-shell:
+	shfmt -i 2 -l -w .
+
+.PHONY: tidy-python
+tidy-python:
+	ruff . --select C4,COM,E,F,I,PLR0402,PT,SIM,UP015,UP018,UP032,UP034 --fix-only --ignore COM812,PT011,PT012,SIM117 || true
 	autoflake --in-place .
 	black  .
 
@@ -408,7 +468,7 @@ docker-test:
 	$(DOCKER_IMAGE) \
 	bash -c "CI=$(CI) \
 	UNSTRUCTURED_INCLUDE_DEBUG_METADATA=$(UNSTRUCTURED_INCLUDE_DEBUG_METADATA) \
-	pytest $(if $(TEST_FILE),$(TEST_FILE),test_unstructured)"
+	pytest -m 'not chipper' $(if $(TEST_FILE),$(TEST_FILE),test_unstructured)"
 
 .PHONY: docker-smoke-test
 docker-smoke-test:

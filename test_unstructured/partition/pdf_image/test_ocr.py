@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,9 +12,21 @@ from unstructured_inference.inference.layoutelement import (
     LayoutElement,
 )
 
-from unstructured.partition import ocr
-from unstructured.partition.ocr import pad_element_bboxes
-from unstructured.partition.utils.ocr_models import paddle_ocr
+from unstructured.documents.elements import ElementType
+from unstructured.partition.pdf_image import ocr
+from unstructured.partition.pdf_image.ocr import pad_element_bboxes
+from unstructured.partition.utils.constants import (
+    Source,
+)
+from unstructured.partition.utils.ocr_models.ocr_interface import (
+    get_elements_from_ocr_regions,
+    merge_text_regions,
+)
+from unstructured.partition.utils.ocr_models.paddle_ocr import OCRAgentPaddle
+from unstructured.partition.utils.ocr_models.tesseract_ocr import (
+    OCRAgentTesseract,
+    zoom_image,
+)
 
 
 @pytest.mark.parametrize(
@@ -29,16 +43,11 @@ def test_process_data_with_ocr_invalid_file(is_image, expected_error):
             data=invalid_data,
             is_image=is_image,
             out_layout=DocumentLayout(),
+            extracted_layout=[],
         )
 
 
-@pytest.mark.parametrize(
-    ("is_image"),
-    [
-        (True),
-        (False),
-    ],
-)
+@pytest.mark.parametrize("is_image", [True, False])
 def test_process_file_with_ocr_invalid_filename(is_image):
     invalid_filename = "i am not a valid file name"
     with pytest.raises(FileNotFoundError):
@@ -46,6 +55,7 @@ def test_process_file_with_ocr_invalid_filename(is_image):
             filename=invalid_filename,
             is_image=is_image,
             out_layout=DocumentLayout(),
+            extracted_layout=[],
         )
 
 
@@ -75,16 +85,16 @@ def test_get_ocr_layout_from_image_tesseract(monkeypatch):
 
     image = Image.new("RGB", (100, 100))
 
-    ocr_layout = ocr.get_ocr_layout_from_image(
+    ocr_agent = OCRAgentTesseract()
+    ocr_layout = ocr_agent.get_layout_from_image(
         image,
         ocr_languages="eng",
-        ocr_agent="tesseract",
     )
 
     expected_layout = [
-        TextRegion.from_coords(10, 5, 25, 15, "Hello", source="OCR-tesseract"),
-        TextRegion.from_coords(20, 15, 45, 35, "World", source="OCR-tesseract"),
-        TextRegion.from_coords(30, 25, 65, 55, "!", source="OCR-tesseract"),
+        TextRegion.from_coords(10, 5, 25, 15, "Hello", source=Source.OCR_TESSERACT),
+        TextRegion.from_coords(20, 15, 45, 35, "World", source=Source.OCR_TESSERACT),
+        TextRegion.from_coords(30, 25, 65, 55, "!", source=Source.OCR_TESSERACT),
     ]
 
     assert ocr_layout == expected_layout
@@ -119,7 +129,7 @@ def mock_ocr(*args, **kwargs):
     ]
 
 
-def monkeypatch_load_agent():
+def monkeypatch_load_agent(language: str):
     class MockAgent:
         def __init__(self):
             self.ocr = mock_ocr
@@ -129,19 +139,22 @@ def monkeypatch_load_agent():
 
 def test_get_ocr_layout_from_image_paddle(monkeypatch):
     monkeypatch.setattr(
-        paddle_ocr,
+        OCRAgentPaddle,
         "load_agent",
         monkeypatch_load_agent,
     )
 
     image = Image.new("RGB", (100, 100))
 
-    ocr_layout = ocr.get_ocr_layout_from_image(image, ocr_languages="eng", ocr_agent="paddle")
+    ocr_layout = OCRAgentPaddle().get_layout_from_image(
+        image,
+        ocr_languages="eng",
+    )
 
     expected_layout = [
-        TextRegion.from_coords(10, 5, 25, 15, "Hello", source="OCR-paddle"),
-        TextRegion.from_coords(20, 15, 45, 35, "World", source="OCR-paddle"),
-        TextRegion.from_coords(30, 25, 65, 55, "!", source="OCR-paddle"),
+        TextRegion.from_coords(10, 5, 25, 15, "Hello", source=Source.OCR_PADDLE),
+        TextRegion.from_coords(20, 15, 45, 35, "World", source=Source.OCR_PADDLE),
+        TextRegion.from_coords(30, 25, 65, 55, "!", source=Source.OCR_PADDLE),
     ]
 
     assert ocr_layout == expected_layout
@@ -151,27 +164,35 @@ def test_get_ocr_text_from_image_tesseract(monkeypatch):
     monkeypatch.setattr(
         unstructured_pytesseract,
         "image_to_string",
-        lambda *args, **kwargs: {"text": "Hello World"},
+        lambda *args, **kwargs: "Hello World",
     )
     image = Image.new("RGB", (100, 100))
 
-    ocr_text = ocr.get_ocr_text_from_image(image, ocr_languages="eng", ocr_agent="tesseract")
+    ocr_agent = OCRAgentTesseract()
+    ocr_text = ocr_agent.get_text_from_image(
+        image,
+        ocr_languages="eng",
+    )
 
     assert ocr_text == "Hello World"
 
 
 def test_get_ocr_text_from_image_paddle(monkeypatch):
     monkeypatch.setattr(
-        paddle_ocr,
+        OCRAgentPaddle,
         "load_agent",
         monkeypatch_load_agent,
     )
 
     image = Image.new("RGB", (100, 100))
 
-    ocr_text = ocr.get_ocr_text_from_image(image, ocr_languages="eng", ocr_agent="paddle")
+    ocr_agent = OCRAgentPaddle()
+    ocr_text = ocr_agent.get_text_from_image(
+        image,
+        ocr_languages="eng",
+    )
 
-    assert ocr_text == "HelloWorld!"
+    assert ocr_text == "Hello\n\nWorld\n\n!"
 
 
 @pytest.fixture()
@@ -219,7 +240,7 @@ def test_merge_text_regions(mock_embedded_text_regions):
         text="LayoutParser: A Unified Toolkit for Deep Learning Based Document Image",
     )
 
-    merged_text_region = ocr.merge_text_regions(mock_embedded_text_regions)
+    merged_text_region = merge_text_regions(mock_embedded_text_regions)
     assert merged_text_region == expected
 
 
@@ -231,11 +252,11 @@ def test_get_elements_from_ocr_regions(mock_embedded_text_regions):
             x2=1256.334784222222,
             y2=406.9837855555556,
             text="LayoutParser: A Unified Toolkit for Deep Learning Based Document Image",
-            type="UncategorizedText",
+            type=ElementType.UNCATEGORIZED_TEXT,
         ),
     ]
 
-    elements = ocr.get_elements_from_ocr_regions(mock_embedded_text_regions)
+    elements = get_elements_from_ocr_regions(mock_embedded_text_regions)
     assert elements == expected
 
 
@@ -243,7 +264,7 @@ def test_get_elements_from_ocr_regions(mock_embedded_text_regions):
 def test_zoom_image(zoom):
     image = Image.new("RGB", (100, 100))
     width, height = image.size
-    new_image = ocr.zoom_image(image, zoom)
+    new_image = zoom_image(image, zoom)
     new_w, new_h = new_image.size
     if zoom <= 0:
         zoom = 1
@@ -254,7 +275,7 @@ def test_zoom_image(zoom):
 @pytest.fixture()
 def mock_layout(mock_embedded_text_regions):
     return [
-        LayoutElement(text=r.text, type="UncategorizedText", bbox=r.bbox)
+        LayoutElement(text=r.text, type=ElementType.UNCATEGORIZED_TEXT, bbox=r.bbox)
         for r in mock_embedded_text_regions
     ]
 
@@ -337,7 +358,7 @@ def mock_embedded_text_regions():
 
 def test_supplement_layout_with_ocr_elements(mock_layout, mock_ocr_regions):
     ocr_elements = [
-        LayoutElement(text=r.text, source=None, type="UncategorizedText", bbox=r.bbox)
+        LayoutElement(text=r.text, source=None, type=ElementType.UNCATEGORIZED_TEXT, bbox=r.bbox)
         for r in mock_ocr_regions
     ]
 
@@ -362,7 +383,7 @@ def test_supplement_layout_with_ocr_elements(mock_layout, mock_ocr_regions):
 
 def test_merge_out_layout_with_ocr_layout(mock_out_layout, mock_ocr_regions):
     ocr_elements = [
-        LayoutElement(text=r.text, source=None, type="UncategorizedText", bbox=r.bbox)
+        LayoutElement(text=r.text, source=None, type=ElementType.UNCATEGORIZED_TEXT, bbox=r.bbox)
         for r in mock_ocr_regions
     ]
 
@@ -393,7 +414,7 @@ def test_pad_element_bboxes(padding, expected_bbox):
         y2=40,
         text="",
         source=None,
-        type="UncategorizedText",
+        type=ElementType.UNCATEGORIZED_TEXT,
     )
     expected_original_element_bbox = (10, 20, 30, 40)
 
@@ -419,7 +440,7 @@ def table_element():
 
 
 @pytest.fixture()
-def ocr_layout():
+def mock_ocr_layout():
     ocr_regions = [
         TextRegion.from_coords(x1=15, y1=25, x2=35, y2=45, text="Token1"),
         TextRegion.from_coords(x1=40, y1=30, x2=45, y2=50, text="Token2"),
@@ -427,23 +448,69 @@ def ocr_layout():
     return ocr_regions
 
 
-def test_get_table_tokens_per_element(table_element, ocr_layout):
-    table_tokens = ocr.get_table_tokens_per_element(table_element, ocr_layout)
-    expected_tokens = [
-        {
-            "bbox": [5, 5, 25, 25],
-            "text": "Token1",
-            "span_num": 0,
-            "line_num": 0,
-            "block_num": 0,
-        },
-        {
-            "bbox": [30, 10, 35, 30],
-            "text": "Token2",
-            "span_num": 1,
-            "line_num": 0,
-            "block_num": 0,
-        },
+def test_get_table_tokens(mock_ocr_layout):
+    with patch.object(OCRAgentTesseract, "get_layout_from_image", return_value=mock_ocr_layout):
+        table_tokens = ocr.get_table_tokens(table_element_image=None)
+        expected_tokens = [
+            {
+                "bbox": [15, 25, 35, 45],
+                "text": "Token1",
+                "span_num": 0,
+                "line_num": 0,
+                "block_num": 0,
+            },
+            {
+                "bbox": [40, 30, 45, 50],
+                "text": "Token2",
+                "span_num": 1,
+                "line_num": 0,
+                "block_num": 0,
+            },
+        ]
+
+        assert table_tokens == expected_tokens
+
+
+def test_auto_zoom_not_exceed_tesseract_limit(monkeypatch):
+    monkeypatch.setenv("TESSERACT_MIN_TEXT_HEIGHT", "1000")
+    monkeypatch.setenv("TESSERACT_OPTIMUM_TEXT_HEIGHT", "100000")
+    monkeypatch.setattr(
+        unstructured_pytesseract,
+        "image_to_data",
+        lambda *args, **kwargs: pd.DataFrame(
+            {
+                "left": [10, 20, 30, 0],
+                "top": [5, 15, 25, 0],
+                "width": [15, 25, 35, 0],
+                "height": [10, 20, 30, 0],
+                "text": ["Hello", "World", "!", ""],
+            },
+        ),
+    )
+
+    image = Image.new("RGB", (1000, 1000))
+    ocr_agent = OCRAgentTesseract()
+    # tests that the code can run instead of oom and OCR results make sense
+    assert [region.text for region in ocr_agent.get_layout_from_image(image)] == [
+        "Hello",
+        "World",
+        "!",
     ]
 
-    assert table_tokens == expected_tokens
+
+def test_merge_out_layout_with_cid_code(mock_out_layout, mock_ocr_regions):
+    # the code should ignore this invalid text and use ocr region's text
+    mock_out_layout[0].text = "(cid:10)(cid:5)?"
+    ocr_elements = [
+        LayoutElement(text=r.text, source=None, type=ElementType.UNCATEGORIZED_TEXT, bbox=r.bbox)
+        for r in mock_ocr_regions
+    ]
+
+    final_layout = ocr.merge_out_layout_with_ocr_layout(mock_out_layout, mock_ocr_regions)
+
+    # Check if the out layout's text attribute is updated with aggregated OCR text
+    assert final_layout[0].text == mock_ocr_regions[2].text
+
+    # Check if the final layout contains both original elements and OCR-derived elements
+    assert all(element in final_layout for element in mock_out_layout)
+    assert any(element in final_layout for element in ocr_elements)

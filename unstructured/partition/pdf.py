@@ -1,29 +1,43 @@
+from __future__ import annotations
+
 import contextlib
 import io
 import os
 import re
 import warnings
 from tempfile import SpooledTemporaryFile
-from typing import IO, Any, BinaryIO, Iterator, List, Optional, Sequence, Tuple, Union, cast
+from typing import (
+    IO,
+    TYPE_CHECKING,
+    Any,
+    BinaryIO,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    cast,
+)
 
 import numpy as np
 import pdf2image
-import PIL
-from pdfminer.converter import PDFPageAggregator
+import wrapt
+from pdfminer import psparser
 from pdfminer.layout import (
-    LAParams,
     LTChar,
     LTContainer,
     LTImage,
     LTItem,
     LTTextBox,
 )
-from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
-from pdfminer.pdfpage import PDFPage
 from pdfminer.pdftypes import PDFObjRef
 from pdfminer.utils import open_filename
+from PIL import Image as PILImage
+from pillow_heif import register_heif_opener
 
-from unstructured.chunking.title import add_chunking_strategy
+from unstructured.chunking import add_chunking_strategy
 from unstructured.cleaners.core import (
     clean_extra_whitespace_with_index_run,
     index_adjustment_after_clean_extra_whitespace,
@@ -33,6 +47,7 @@ from unstructured.documents.elements import (
     CoordinatesMetadata,
     Element,
     ElementMetadata,
+    ElementType,
     Image,
     Link,
     ListItem,
@@ -52,34 +67,67 @@ from unstructured.partition.common import (
     exactly_one,
     get_last_modified_date,
     get_last_modified_date_from_file,
+    ocr_data_to_elements,
     spooled_to_bytes_io_if_needed,
 )
 from unstructured.partition.lang import (
-    convert_old_ocr_languages_to_languages,
+    check_language_args,
     prepare_languages_for_tesseract,
 )
-from unstructured.partition.strategies import determine_pdf_or_image_strategy
-from unstructured.partition.text import element_from_text, partition_text
+from unstructured.partition.pdf_image.pdf_image_utils import (
+    annotate_layout_elements,
+    check_element_types_to_extract,
+    save_elements,
+)
+from unstructured.partition.pdf_image.pdfminer_processing import (
+    merge_inferred_with_extracted_layout,
+)
+from unstructured.partition.pdf_image.pdfminer_utils import (
+    open_pdfminer_pages_generator,
+    rect_to_bbox,
+)
+from unstructured.partition.strategies import determine_pdf_or_image_strategy, validate_strategy
+from unstructured.partition.text import element_from_text
 from unstructured.partition.utils.constants import (
     SORT_MODE_BASIC,
     SORT_MODE_DONT,
     SORT_MODE_XY_CUT,
     OCRMode,
+    PartitionStrategy,
 )
+from unstructured.partition.utils.processing_elements import clean_pdfminer_inner_elements
 from unstructured.partition.utils.sorting import (
     coord_has_valid_points,
     sort_page_elements,
 )
+from unstructured.patches.pdfminer import parse_keyword
 from unstructured.utils import requires_dependencies
+
+if TYPE_CHECKING:
+    pass
+
+# NOTE(alan): Patching this to fix a bug in pdfminer.six. Submitted this PR into pdfminer.six to fix
+# the bug: https://github.com/pdfminer/pdfminer.six/pull/885
+psparser.PSBaseParser._parse_keyword = parse_keyword  # type: ignore
 
 RE_MULTISPACE_INCLUDING_NEWLINES = re.compile(pattern=r"\s+", flags=re.DOTALL)
 
 
+@requires_dependencies("unstructured_inference")
 def default_hi_res_model() -> str:
     # a light config for the hi res model; this is not defined as a constant so that no setting of
     # the default hi res model name is done on importing of this submodule; this allows (if user
     # prefers) for setting env after importing the sub module and changing the default model name
-    return os.environ.get("UNSTRUCTURED_HI_RES_MODEL_NAME", "yolox_quantized")
+
+    # if tabler structure is needed we defaul to use yolox for better table detection
+    logger.warning(
+        "This function will be deprecated in a future release and `unstructured` will simply "
+        "use the DEFAULT_MODEL from `unstructured_inference.model.base` to set default model "
+        "name"
+    )
+    from unstructured_inference.models.base import DEFAULT_MODEL
+
+    return os.environ.get("UNSTRUCTURED_HI_RES_MODEL_NAME", DEFAULT_MODEL)
 
 
 @process_metadata()
@@ -89,19 +137,20 @@ def partition_pdf(
     filename: str = "",
     file: Optional[Union[BinaryIO, SpooledTemporaryFile]] = None,
     include_page_breaks: bool = False,
-    strategy: str = "auto",
+    strategy: str = PartitionStrategy.AUTO,
     infer_table_structure: bool = False,
     ocr_languages: Optional[str] = None,  # changing to optional for deprecation
-    languages: List[str] = ["eng"],
-    max_partition: Optional[int] = 1500,
-    min_partition: Optional[int] = 0,
-    include_metadata: bool = True,
-    metadata_filename: Optional[str] = None,
+    languages: Optional[List[str]] = None,
+    include_metadata: bool = True,  # used by decorator
+    metadata_filename: Optional[str] = None,  # used by decorator
     metadata_last_modified: Optional[str] = None,
-    chunking_strategy: Optional[str] = None,
+    chunking_strategy: Optional[str] = None,  # used by decorator
     links: Sequence[Link] = [],
+    hi_res_model_name: Optional[str] = None,
     extract_images_in_pdf: bool = False,
-    image_output_dir_path: Optional[str] = None,
+    extract_image_block_types: Optional[List[str]] = None,
+    extract_image_block_output_dir: Optional[str] = None,
+    extract_image_block_to_payload: bool = False,
     **kwargs,
 ) -> List[Element]:
     """Parses a pdf document into a list of interpreted elements.
@@ -129,38 +178,37 @@ def partition_pdf(
     languages
         The languages present in the document, for use in partitioning and/or OCR. To use a language
         with Tesseract, you'll first need to install the appropriate Tesseract language pack.
-    max_partition
-        The maximum number of characters to include in a partition. If None is passed,
-        no maximum is applied. Only applies to the "ocr_only" strategy.
-    min_partition
-        The minimum number of characters to include in a partition. Only applies if
-        processing text/plain content.
     metadata_last_modified
         The last modified date for the document.
+    hi_res_model_name
+        The layout detection model used when partitioning strategy is set to `hi_res`.
     extract_images_in_pdf
-        If True and strategy=hi_res, any detected images will be saved in the path specified by
-        image_output_dir_path.
-    image_output_dir_path
-        If extract_images_in_pdf=True and strategy=hi_res, any detected images will be saved in the
-        given path
+        Only applicable if `strategy=hi_res`.
+        If True, any detected images will be saved in the path specified by
+        'extract_image_block_output_dir' or stored as base64 encoded data within metadata fields.
+        Deprecation Note: This parameter is marked for deprecation. Future versions will use
+        'extract_image_block_types' for broader extraction capabilities.
+    extract_image_block_types
+        Only applicable if `strategy=hi_res`.
+        Images of the element type(s) specified in this list (e.g., ["Image", "Table"]) will be
+        saved in the path specified by 'extract_image_block_output_dir' or stored as base64
+        encoded data within metadata fields.
+    extract_image_block_to_payload
+        Only applicable if `strategy=hi_res`.
+        If True, images of the element type(s) defined in 'extract_image_block_types' will be
+        encoded as base64 data and stored in two metadata fields: 'image_base64' and
+        'image_mime_type'.
+        This parameter facilitates the inclusion of element data directly within the payload,
+        especially for web-based applications or APIs.
+    extract_image_block_output_dir
+        Only applicable if `strategy=hi_res` and `extract_image_block_to_payload=False`.
+        The filesystem path for saving images of the element type(s)
+        specified in 'extract_image_block_types'.
     """
+
     exactly_one(filename=filename, file=file)
 
-    if ocr_languages is not None:
-        # check if languages was set to anything not the default value
-        # languages and ocr_languages were therefore both provided - raise error
-        if languages != ["eng"]:
-            raise ValueError(
-                "Only one of languages and ocr_languages should be specified. "
-                "languages is preferred. ocr_languages is marked for deprecation.",
-            )
-
-        else:
-            languages = convert_old_ocr_languages_to_languages(ocr_languages)
-            logger.warning(
-                "The ocr_languages kwarg will be deprecated in a future version of unstructured. "
-                "Please use languages instead.",
-            )
+    languages = check_language_args(languages or [], ocr_languages) or ["eng"]
 
     return partition_pdf_or_image(
         filename=filename,
@@ -169,11 +217,12 @@ def partition_pdf(
         strategy=strategy,
         infer_table_structure=infer_table_structure,
         languages=languages,
-        max_partition=max_partition,
-        min_partition=min_partition,
         metadata_last_modified=metadata_last_modified,
+        hi_res_model_name=hi_res_model_name,
         extract_images_in_pdf=extract_images_in_pdf,
-        image_output_dir_path=image_output_dir_path,
+        extract_image_block_types=extract_image_block_types,
+        extract_image_block_output_dir=extract_image_block_output_dir,
+        extract_image_block_to_payload=extract_image_block_to_payload,
         **kwargs,
     )
 
@@ -182,6 +231,7 @@ def extractable_elements(
     filename: str = "",
     file: Optional[Union[bytes, IO[bytes]]] = None,
     include_page_breaks: bool = False,
+    languages: Optional[List[str]] = None,
     metadata_last_modified: Optional[str] = None,
     **kwargs: Any,
 ):
@@ -191,6 +241,7 @@ def extractable_elements(
         filename=filename,
         file=file,
         include_page_breaks=include_page_breaks,
+        languages=languages,
         metadata_last_modified=metadata_last_modified,
         **kwargs,
     )
@@ -208,135 +259,6 @@ def get_the_last_modification_date_pdf_or_img(
     return last_modification_date
 
 
-def partition_pdf_or_image(
-    filename: str = "",
-    file: Optional[Union[bytes, BinaryIO, SpooledTemporaryFile]] = None,
-    is_image: bool = False,
-    include_page_breaks: bool = False,
-    strategy: str = "auto",
-    infer_table_structure: bool = False,
-    ocr_languages: Optional[str] = None,
-    languages: Optional[List[str]] = ["eng"],
-    max_partition: Optional[int] = 1500,
-    min_partition: Optional[int] = 0,
-    metadata_last_modified: Optional[str] = None,
-    extract_images_in_pdf: bool = False,
-    image_output_dir_path: Optional[str] = None,
-    **kwargs,
-) -> List[Element]:
-    """Parses a pdf or image document into a list of interpreted elements."""
-    # TODO(alan): Extract information about the filetype to be processed from the template
-    # route. Decoding the routing should probably be handled by a single function designed for
-    # that task so as routing design changes, those changes are implemented in a single
-    # function.
-
-    # The auto `partition` function uses `None` as a default because the default for
-    # `partition_pdf` and `partition_img` conflict with the other partitioners that use ["auto"]
-    if languages is None:
-        languages = ["eng"]
-
-    if not isinstance(languages, list):
-        raise TypeError(
-            "The language parameter must be a list of language codes as strings, ex. ['eng']",
-        )
-
-    if ocr_languages is not None:
-        if languages != ["eng"]:
-            raise ValueError(
-                "Only one of languages and ocr_languages should be specified. "
-                "languages is preferred. ocr_languages is marked for deprecation.",
-            )
-
-        else:
-            languages = convert_old_ocr_languages_to_languages(ocr_languages)
-            logger.warning(
-                "The ocr_languages kwarg will be deprecated in a future version of unstructured. "
-                "Please use languages instead.",
-            )
-
-    last_modification_date = get_the_last_modification_date_pdf_or_img(
-        file=file,
-        filename=filename,
-    )
-
-    if (
-        not is_image
-        and determine_pdf_or_image_strategy(
-            strategy,
-            filename=filename,
-            file=file,
-            is_image=is_image,
-            infer_table_structure=infer_table_structure,
-        )
-        != "ocr_only"
-    ):
-        extracted_elements = extractable_elements(
-            filename=filename,
-            file=spooled_to_bytes_io_if_needed(file),
-            include_page_breaks=include_page_breaks,
-            metadata_last_modified=metadata_last_modified or last_modification_date,
-            **kwargs,
-        )
-        pdf_text_extractable = any(
-            isinstance(el, Text) and el.text.strip() for el in extracted_elements
-        )
-    else:
-        pdf_text_extractable = False
-
-    strategy = determine_pdf_or_image_strategy(
-        strategy,
-        filename=filename,
-        file=file,
-        is_image=is_image,
-        infer_table_structure=infer_table_structure,
-        pdf_text_extractable=pdf_text_extractable,
-    )
-
-    if strategy == "hi_res":
-        # NOTE(robinson): Catches a UserWarning that occurs when detectron is called
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            _layout_elements = _partition_pdf_or_image_local(
-                filename=filename,
-                file=spooled_to_bytes_io_if_needed(file),
-                is_image=is_image,
-                infer_table_structure=infer_table_structure,
-                include_page_breaks=include_page_breaks,
-                languages=languages,
-                metadata_last_modified=metadata_last_modified or last_modification_date,
-                extract_images_in_pdf=extract_images_in_pdf,
-                image_output_dir_path=image_output_dir_path,
-                **kwargs,
-            )
-            layout_elements = []
-            for el in _layout_elements:
-                if hasattr(el, "category") and el.category == "UncategorizedText":
-                    new_el = element_from_text(cast(Text, el).text)
-                    new_el.metadata = el.metadata
-                else:
-                    new_el = el
-                layout_elements.append(new_el)
-
-    elif strategy == "fast":
-        return extracted_elements
-
-    elif strategy == "ocr_only":
-        # NOTE(robinson): Catches file conversion warnings when running with PDFs
-        with warnings.catch_warnings():
-            return _partition_pdf_or_image_with_ocr(
-                filename=filename,
-                file=file,
-                include_page_breaks=include_page_breaks,
-                languages=languages,
-                is_image=is_image,
-                max_partition=max_partition,
-                min_partition=min_partition,
-                metadata_last_modified=metadata_last_modified or last_modification_date,
-            )
-
-    return layout_elements
-
-
 @requires_dependencies("unstructured_inference")
 def _partition_pdf_or_image_local(
     filename: str = "",
@@ -344,54 +266,89 @@ def _partition_pdf_or_image_local(
     is_image: bool = False,
     infer_table_structure: bool = False,
     include_page_breaks: bool = False,
-    languages: Optional[List[str]] = ["eng"],
+    languages: Optional[List[str]] = None,
     ocr_mode: str = OCRMode.FULL_PAGE.value,
-    model_name: Optional[str] = None,
-    metadata_last_modified: Optional[str] = None,
-    extract_images_in_pdf: bool = False,
-    image_output_dir_path: Optional[str] = None,
+    model_name: Optional[str] = None,  # to be deprecated in favor of `hi_res_model_name`
+    hi_res_model_name: Optional[str] = None,
     pdf_image_dpi: Optional[int] = None,
+    metadata_last_modified: Optional[str] = None,
+    pdf_text_extractable: bool = False,
+    extract_images_in_pdf: bool = False,
+    extract_image_block_types: Optional[List[str]] = None,
+    extract_image_block_output_dir: Optional[str] = None,
+    extract_image_block_to_payload: bool = False,
+    analysis: bool = False,
+    analyzed_image_output_dir_path: Optional[str] = None,
     **kwargs,
 ) -> List[Element]:
-    """Partition using package installed locally."""
+    """Partition using package installed locally"""
     from unstructured_inference.inference.layout import (
         process_data_with_model,
         process_file_with_model,
     )
 
-    from unstructured.partition.ocr import (
+    from unstructured.partition.pdf_image.ocr import (
         process_data_with_ocr,
         process_file_with_ocr,
     )
+    from unstructured.partition.pdf_image.pdfminer_processing import (
+        process_data_with_pdfminer,
+        process_file_with_pdfminer,
+    )
+
+    if languages is None:
+        languages = ["eng"]
 
     ocr_languages = prepare_languages_for_tesseract(languages)
 
-    model_name = model_name or default_hi_res_model()
+    hi_res_model_name = hi_res_model_name or model_name or default_hi_res_model()
     if pdf_image_dpi is None:
-        pdf_image_dpi = 300 if model_name == "chipper" else 200
-    if (pdf_image_dpi < 300) and (model_name == "chipper"):
+        pdf_image_dpi = 300 if hi_res_model_name.startswith("chipper") else 200
+    if (pdf_image_dpi < 300) and (hi_res_model_name.startswith("chipper")):
         logger.warning(
             "The Chipper model performs better when images are rendered with DPI >= 300 "
             f"(currently {pdf_image_dpi}).",
         )
 
     if file is None:
-        # NOTE(christine): out_layout = extracted_layout + inferred_layout
-        out_layout = process_file_with_model(
+        inferred_document_layout = process_file_with_model(
             filename,
             is_image=is_image,
-            model_name=model_name,
+            model_name=hi_res_model_name,
             pdf_image_dpi=pdf_image_dpi,
-            extract_images_in_pdf=extract_images_in_pdf,
-            image_output_dir_path=image_output_dir_path,
         )
-        if model_name.startswith("chipper"):
+
+        if hi_res_model_name.startswith("chipper"):
             # NOTE(alan): We shouldn't do OCR with chipper
-            final_layout = out_layout
+            # NOTE(antonio): We shouldn't do PDFMiner with chipper
+            final_document_layout = inferred_document_layout
         else:
-            final_layout = process_file_with_ocr(
+            extracted_layout = (
+                process_file_with_pdfminer(filename=filename, dpi=pdf_image_dpi)
+                if pdf_text_extractable
+                else []
+            )
+
+            if analysis:
+                annotate_layout_elements(
+                    inferred_document_layout=inferred_document_layout,
+                    extracted_layout=extracted_layout,
+                    filename=filename,
+                    output_dir_path=analyzed_image_output_dir_path,
+                    pdf_image_dpi=pdf_image_dpi,
+                    is_image=is_image,
+                )
+
+            # NOTE(christine): merged_document_layout = extracted_layout + inferred_layout
+            merged_document_layout = merge_inferred_with_extracted_layout(
+                inferred_document_layout=inferred_document_layout,
+                extracted_layout=extracted_layout,
+            )
+
+            final_document_layout = process_file_with_ocr(
                 filename,
-                out_layout,
+                merged_document_layout,
+                extracted_layout=extracted_layout,
                 is_image=is_image,
                 infer_table_structure=infer_table_structure,
                 ocr_languages=ocr_languages,
@@ -399,23 +356,39 @@ def _partition_pdf_or_image_local(
                 pdf_image_dpi=pdf_image_dpi,
             )
     else:
-        out_layout = process_data_with_model(
+        inferred_document_layout = process_data_with_model(
             file,
             is_image=is_image,
-            model_name=model_name,
+            model_name=hi_res_model_name,
             pdf_image_dpi=pdf_image_dpi,
-            extract_images_in_pdf=extract_images_in_pdf,
-            image_output_dir_path=image_output_dir_path,
         )
-        if model_name.startswith("chipper"):
+
+        if hi_res_model_name.startswith("chipper"):
             # NOTE(alan): We shouldn't do OCR with chipper
-            final_layout = out_layout
+            # NOTE(antonio): We shouldn't do PDFMiner with chipper
+            final_document_layout = inferred_document_layout
         else:
             if hasattr(file, "seek"):
                 file.seek(0)
-            final_layout = process_data_with_ocr(
+
+            extracted_layout = (
+                process_data_with_pdfminer(file=file, dpi=pdf_image_dpi)
+                if pdf_text_extractable
+                else []
+            )
+
+            # NOTE(christine): merged_document_layout = extracted_layout + inferred_layout
+            merged_document_layout = merge_inferred_with_extracted_layout(
+                inferred_document_layout=inferred_document_layout,
+                extracted_layout=extracted_layout,
+            )
+
+            if hasattr(file, "seek"):
+                file.seek(0)
+            final_document_layout = process_data_with_ocr(
                 file,
-                out_layout,
+                merged_document_layout,
+                extracted_layout=extracted_layout,
                 is_image=is_image,
                 infer_table_structure=infer_table_structure,
                 ocr_languages=ocr_languages,
@@ -424,11 +397,17 @@ def _partition_pdf_or_image_local(
             )
 
     # NOTE(alan): starting with v2, chipper sorts the elements itself.
-    if model_name == "chipper":
+    if hi_res_model_name.startswith("chipper") and hi_res_model_name != "chipperv1":
         kwargs["sort_mode"] = SORT_MODE_DONT
 
+    final_document_layout = clean_pdfminer_inner_elements(final_document_layout)
+
+    for page in final_document_layout.pages:
+        for el in page.elements:
+            el.text = el.text or ""
+
     elements = document_to_element_list(
-        final_layout,
+        final_document_layout,
         sortable=True,
         include_page_breaks=include_page_breaks,
         last_modification_date=metadata_last_modified,
@@ -436,9 +415,39 @@ def _partition_pdf_or_image_local(
         # block with NLP rules. Otherwise, the assumptions in
         # unstructured.partition.common::layout_list_to_list_items often result in weird chunking.
         infer_list_items=False,
-        detection_origin="image" if is_image else "pdf",
+        languages=languages,
         **kwargs,
     )
+
+    extract_image_block_types = check_element_types_to_extract(extract_image_block_types)
+    #  NOTE(christine): `extract_images_in_pdf` would deprecate
+    #  (but continue to support for a while)
+    if extract_images_in_pdf:
+        save_elements(
+            elements=elements,
+            element_category_to_save=ElementType.IMAGE,
+            filename=filename,
+            file=file,
+            is_image=is_image,
+            pdf_image_dpi=pdf_image_dpi,
+            extract_image_block_to_payload=extract_image_block_to_payload,
+            output_dir_path=extract_image_block_output_dir,
+        )
+
+    for el_type in extract_image_block_types:
+        if extract_images_in_pdf and el_type == ElementType.IMAGE:
+            continue
+
+        save_elements(
+            elements=elements,
+            element_category_to_save=el_type,
+            filename=filename,
+            file=file,
+            is_image=is_image,
+            pdf_image_dpi=pdf_image_dpi,
+            extract_image_block_to_payload=extract_image_block_to_payload,
+            output_dir_path=extract_image_block_output_dir,
+        )
 
     out_elements = []
     for el in elements:
@@ -446,13 +455,7 @@ def _partition_pdf_or_image_local(
             continue
 
         if isinstance(el, Image):
-            # NOTE(crag): small chunks of text from Image elements tend to be garbage
-            if not el.metadata.image_path and (
-                el.text is None or len(el.text) < 24 or el.text.find(" ") == -1
-            ):
-                continue
-            else:
-                out_elements.append(cast(Element, el))
+            out_elements.append(cast(Element, el))
         # NOTE(crag): this is probably always a Text object, but check for the sake of typing
         elif isinstance(el, Text):
             el.text = re.sub(
@@ -462,18 +465,142 @@ def _partition_pdf_or_image_local(
             ).strip()
             # NOTE(alan): with chipper there are parent elements with no text we don't want to
             # filter those out and leave the children orphaned.
-            if el.text or isinstance(el, PageBreak) or model_name.startswith("chipper"):
+            if el.text or isinstance(el, PageBreak) or hi_res_model_name.startswith("chipper"):
                 out_elements.append(cast(Element, el))
+
+    return out_elements
+
+
+def partition_pdf_or_image(
+    filename: str = "",
+    file: Optional[Union[bytes, BinaryIO, SpooledTemporaryFile]] = None,
+    is_image: bool = False,
+    include_page_breaks: bool = False,
+    strategy: str = PartitionStrategy.AUTO,
+    infer_table_structure: bool = False,
+    ocr_languages: Optional[str] = None,
+    languages: Optional[List[str]] = None,
+    metadata_last_modified: Optional[str] = None,
+    hi_res_model_name: Optional[str] = None,
+    extract_images_in_pdf: bool = False,
+    extract_image_block_types: Optional[List[str]] = None,
+    extract_image_block_output_dir: Optional[str] = None,
+    extract_image_block_to_payload: bool = False,
+    **kwargs,
+) -> List[Element]:
+    """Parses a pdf or image document into a list of interpreted elements."""
+    # TODO(alan): Extract information about the filetype to be processed from the template
+    # route. Decoding the routing should probably be handled by a single function designed for
+    # that task so as routing design changes, those changes are implemented in a single
+    # function.
+
+    # init ability to process .heic files
+    register_heif_opener()
+
+    validate_strategy(strategy, is_image)
+
+    last_modification_date = get_the_last_modification_date_pdf_or_img(
+        file=file,
+        filename=filename,
+    )
+
+    extracted_elements = []
+    pdf_text_extractable = False
+    if not is_image:
+        try:
+            extracted_elements = extractable_elements(
+                filename=filename,
+                file=spooled_to_bytes_io_if_needed(file),
+                include_page_breaks=include_page_breaks,
+                languages=languages,
+                metadata_last_modified=metadata_last_modified or last_modification_date,
+                **kwargs,
+            )
+            pdf_text_extractable = any(
+                isinstance(el, Text) and el.text.strip() for el in extracted_elements
+            )
+        except Exception as e:
+            logger.error(e)
+            logger.warning("PDF text extraction failed, skip text extraction...")
+
+    strategy = determine_pdf_or_image_strategy(
+        strategy,
+        is_image=is_image,
+        pdf_text_extractable=pdf_text_extractable,
+        infer_table_structure=infer_table_structure,
+        extract_images_in_pdf=extract_images_in_pdf,
+        extract_image_block_types=extract_image_block_types,
+    )
+
+    if file is not None:
+        file.seek(0)
+
+    if strategy == PartitionStrategy.HI_RES:
+        # NOTE(robinson): Catches a UserWarning that occurs when detectron is called
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            elements = _partition_pdf_or_image_local(
+                filename=filename,
+                file=spooled_to_bytes_io_if_needed(file),
+                is_image=is_image,
+                infer_table_structure=infer_table_structure,
+                include_page_breaks=include_page_breaks,
+                languages=languages,
+                metadata_last_modified=metadata_last_modified or last_modification_date,
+                hi_res_model_name=hi_res_model_name,
+                pdf_text_extractable=pdf_text_extractable,
+                extract_images_in_pdf=extract_images_in_pdf,
+                extract_image_block_types=extract_image_block_types,
+                extract_image_block_output_dir=extract_image_block_output_dir,
+                extract_image_block_to_payload=extract_image_block_to_payload,
+                **kwargs,
+            )
+            out_elements = _process_uncategorized_text_elements(elements)
+
+    elif strategy == PartitionStrategy.FAST:
+        return extracted_elements
+
+    elif strategy == PartitionStrategy.OCR_ONLY:
+        # NOTE(robinson): Catches file conversion warnings when running with PDFs
+        with warnings.catch_warnings():
+            elements = _partition_pdf_or_image_with_ocr(
+                filename=filename,
+                file=file,
+                include_page_breaks=include_page_breaks,
+                languages=languages,
+                is_image=is_image,
+                metadata_last_modified=metadata_last_modified or last_modification_date,
+                **kwargs,
+            )
+            out_elements = _process_uncategorized_text_elements(elements)
+
+    return out_elements
+
+
+def _process_uncategorized_text_elements(elements: List[Element]):
+    """Processes a list of elements, creating a new list where elements with the
+    category `UncategorizedText` are replaced with corresponding
+    elements created from their text content."""
+
+    out_elements = []
+    for el in elements:
+        if hasattr(el, "category") and el.category == ElementType.UNCATEGORIZED_TEXT:
+            new_el = element_from_text(cast(Text, el).text)
+            new_el.metadata = el.metadata
+        else:
+            new_el = el
+        out_elements.append(new_el)
 
     return out_elements
 
 
 @requires_dependencies("pdfminer", "local-inference")
 def _partition_pdf_with_pdfminer(
-    filename: str = "",
-    file: Optional[IO[bytes]] = None,
-    include_page_breaks: bool = False,
-    metadata_last_modified: Optional[str] = None,
+    filename: str,
+    file: Optional[IO[bytes]],
+    include_page_breaks: bool,
+    languages: List[str],
+    metadata_last_modified: Optional[str],
     **kwargs: Any,
 ) -> List[Element]:
     """Partitions a PDF using PDFMiner instead of using a layoutmodel. Used for faster
@@ -484,6 +611,9 @@ def _partition_pdf_with_pdfminer(
 
     ref: https://github.com/pdfminer/pdfminer.six/blob/master/pdfminer/high_level.py
     """
+    if languages is None:
+        languages = ["eng"]
+
     exactly_one(filename=filename, file=file)
     if filename:
         with open_filename(filename, "rb") as fp:
@@ -492,6 +622,7 @@ def _partition_pdf_with_pdfminer(
                 fp=fp,
                 filename=filename,
                 include_page_breaks=include_page_breaks,
+                languages=languages,
                 metadata_last_modified=metadata_last_modified,
                 **kwargs,
             )
@@ -502,6 +633,7 @@ def _partition_pdf_with_pdfminer(
             fp=fp,
             filename=filename,
             include_page_breaks=include_page_breaks,
+            languages=languages,
             metadata_last_modified=metadata_last_modified,
             **kwargs,
         )
@@ -528,29 +660,35 @@ def _extract_text(item: LTItem) -> str:
     return "\n"
 
 
+# Some pages with a ICC color space do not follow the pdf spec
+# They throw an error when we call interpreter.process_page
+# Since we don't need color info, we can just drop it in the pdfminer code
+# See #2059
+@wrapt.patch_function_wrapper("pdfminer.pdfinterp", "PDFPageInterpreter.init_resources")
+def pdfminer_interpreter_init_resources(wrapped, instance, args, kwargs):
+    resources = args[0]
+    if "ColorSpace" in resources:
+        del resources["ColorSpace"]
+
+    return wrapped(resources)
+
+
 def _process_pdfminer_pages(
     fp: BinaryIO,
-    filename: str = "",
-    include_page_breaks: bool = False,
-    metadata_last_modified: Optional[str] = None,
+    filename: str,
+    include_page_breaks: bool,
+    languages: List[str],
+    metadata_last_modified: Optional[str],
     sort_mode: str = SORT_MODE_XY_CUT,
     **kwargs,
 ):
-    """Uses PDF miner to split a document into pages and process them."""
+    """Uses PDFMiner to split a document into pages and process them."""
     elements: List[Element] = []
 
-    rsrcmgr = PDFResourceManager()
-    laparams = LAParams()
-    device = PDFPageAggregator(rsrcmgr, laparams=laparams)
-    interpreter = PDFPageInterpreter(rsrcmgr, device)
-
-    for i, page in enumerate(PDFPage.get_pages(fp)):  # type: ignore
-        interpreter.process_page(page)
-        page_layout = device.get_result()
-
+    for i, (page, page_layout) in enumerate(open_pdfminer_pages_generator(fp)):
         width, height = page_layout.width, page_layout.height
 
-        page_elements = []
+        page_elements: List[Element] = []
         annotation_list = []
 
         coordinate_system = PixelSpace(
@@ -564,7 +702,7 @@ def _process_pdfminer_pages(
             x1, y1, x2, y2 = rect_to_bbox(obj.bbox, height)
             bbox = (x1, y1, x2, y2)
 
-            urls_metadata = []
+            urls_metadata: List[Dict[str, Any]] = []
 
             if len(annotation_list) > 0 and isinstance(obj, LTTextBox):
                 annotations_within_element = check_annotations_within_element(
@@ -577,7 +715,7 @@ def _process_pdfminer_pages(
                     urls_metadata.append(map_bbox_and_index(words, annot))
 
             if hasattr(obj, "get_text"):
-                _text_snippets = [obj.get_text()]
+                _text_snippets: List = [obj.get_text()]
             else:
                 _text = _extract_text(obj)
                 _text_snippets = re.split(PARAGRAPH_PATTERN, _text)
@@ -595,20 +733,7 @@ def _process_pdfminer_pages(
                         points=points,
                         system=coordinate_system,
                     )
-
-                    links: List[Link] = []
-                    for url in urls_metadata:
-                        with contextlib.suppress(IndexError):
-                            links.append(
-                                {
-                                    "text": url["text"],
-                                    "url": url["uri"],
-                                    "start_index": index_adjustment_after_clean_extra_whitespace(
-                                        url["start_index"],
-                                        moved_indices,
-                                    ),
-                                },
-                            )
+                    links = _get_links_from_urls_metadata(urls_metadata, moved_indices)
 
                     element.metadata = ElementMetadata(
                         filename=filename,
@@ -616,53 +741,12 @@ def _process_pdfminer_pages(
                         coordinates=coordinates_metadata,
                         last_modified=metadata_last_modified,
                         links=links,
+                        languages=languages,
                     )
                     element.metadata.detection_origin = "pdfminer"
                     page_elements.append(element)
-        list_item = 0
-        updated_page_elements = []  # type: ignore
-        coordinate_system = PixelSpace(width=width, height=height)
-        for page_element in page_elements:
-            if isinstance(page_element, ListItem):
-                list_item += 1
-                list_page_element = page_element
-                list_item_text = page_element.text
-                list_item_coords = page_element.metadata.coordinates
-            elif list_item > 0 and check_coords_within_boundary(
-                page_element.metadata.coordinates,
-                list_item_coords,
-            ):
-                text = page_element.text  # type: ignore
-                list_item_text = list_item_text + " " + text
-                x1 = min(
-                    list_page_element.metadata.coordinates.points[0][0],
-                    page_element.metadata.coordinates.points[0][0],
-                )
-                x2 = max(
-                    list_page_element.metadata.coordinates.points[2][0],
-                    page_element.metadata.coordinates.points[2][0],
-                )
-                y1 = min(
-                    list_page_element.metadata.coordinates.points[0][1],
-                    page_element.metadata.coordinates.points[0][1],
-                )
-                y2 = max(
-                    list_page_element.metadata.coordinates.points[1][1],
-                    page_element.metadata.coordinates.points[1][1],
-                )
-                points = ((x1, y1), (x1, y2), (x2, y2), (x2, y1))
-                list_page_element.text = list_item_text
-                list_page_element.metadata.coordinates = CoordinatesMetadata(
-                    points=points,
-                    system=coordinate_system,
-                )
-                page_element = list_page_element
-                updated_page_elements.pop()
 
-            updated_page_elements.append(page_element)
-
-        page_elements = updated_page_elements
-        del updated_page_elements
+        page_elements = _combine_list_elements(page_elements, coordinate_system)
 
         # NOTE(crag, christine): always do the basic sort first for determinsitic order across
         # python versions.
@@ -678,11 +762,87 @@ def _process_pdfminer_pages(
     return elements
 
 
+def _combine_list_elements(
+    elements: List[Element], coordinate_system: Union[PixelSpace, PointSpace]
+) -> List[Element]:
+    """Combine elements that should be considered a single ListItem element."""
+    tmp_element = None
+    updated_elements: List[Element] = []
+    for element in elements:
+        if isinstance(element, ListItem):
+            tmp_element = element
+            tmp_text = element.text
+            tmp_coords = element.metadata.coordinates
+        elif tmp_element and check_coords_within_boundary(
+            coordinates=element.metadata.coordinates,
+            boundary=tmp_coords,
+        ):
+            tmp_element.text = f"{tmp_text} {element.text}"
+            # replace "element" with the corrected element
+            element = _combine_coordinates_into_element1(
+                element1=tmp_element,
+                element2=element,
+                coordinate_system=coordinate_system,
+            )
+            # remove previously added ListItem element with incomplete text
+            updated_elements.pop()
+        updated_elements.append(element)
+    return updated_elements
+
+
+def _get_links_from_urls_metadata(
+    urls_metadata: List[Dict[str, Any]], moved_indices: np.ndarray
+) -> List[Link]:
+    """Extracts links from a list of URL metadata."""
+    links: List[Link] = []
+    for url in urls_metadata:
+        with contextlib.suppress(IndexError):
+            links.append(
+                {
+                    "text": url["text"],
+                    "url": url["uri"],
+                    "start_index": index_adjustment_after_clean_extra_whitespace(
+                        url["start_index"],
+                        moved_indices,
+                    ),
+                },
+            )
+    return links
+
+
+def _combine_coordinates_into_element1(
+    element1: Element, element2: Element, coordinate_system: Union[PixelSpace, PointSpace]
+) -> Element:
+    """Combine the coordiantes of two elements and apply the updated coordiantes to `elements1`"""
+    x1 = min(
+        element1.metadata.coordinates.points[0][0],
+        element2.metadata.coordinates.points[0][0],
+    )
+    x2 = max(
+        element1.metadata.coordinates.points[2][0],
+        element2.metadata.coordinates.points[2][0],
+    )
+    y1 = min(
+        element1.metadata.coordinates.points[0][1],
+        element2.metadata.coordinates.points[0][1],
+    )
+    y2 = max(
+        element1.metadata.coordinates.points[1][1],
+        element2.metadata.coordinates.points[1][1],
+    )
+    points = ((x1, y1), (x1, y2), (x2, y2), (x2, y1))
+    element1.metadata.coordinates = CoordinatesMetadata(
+        points=points,
+        system=coordinate_system,
+    )
+    return element1
+
+
 def convert_pdf_to_images(
     filename: str = "",
     file: Optional[Union[bytes, IO[bytes]]] = None,
     chunk_size: int = 10,
-) -> Iterator[PIL.Image.Image]:
+) -> Iterator[PILImage.Image]:
     # Convert a PDF in small chunks of pages at a time (e.g. 1-10, 11-20... and so on)
     exactly_one(filename=filename, file=file)
     if file is not None:
@@ -712,177 +872,100 @@ def convert_pdf_to_images(
             yield image
 
 
-def _get_element_box(
-    boxes: List[str],
-    char_count: int,
-) -> Tuple[Tuple[Tuple[float, float], Tuple[float, int], Tuple[int, int], Tuple[int, float]], int]:
-    """Helper function to get the bounding box of an element.
-
-    Args:
-        boxes (List[str])
-        char_count (int)
-    """
-    min_x = float("inf")
-    min_y = float("inf")
-    max_x = 0
-    max_y = 0
-    for box in boxes:
-        _, _x1, _y1, _x2, _y2, _ = box.split()
-
-        x1, y1, x2, y2 = map(int, [_x1, _y1, _x2, _y2])
-        min_x = min(min_x, x1)
-        min_y = min(min_y, y1)
-        max_x = max(max_x, x2)
-        max_y = max(max_y, y2)
-
-    return ((min_x, min_y), (min_x, max_y), (max_x, max_y), (max_x, min_y)), char_count
-
-
-def _add_pytesseract_bboxes_to_elements(
-    elements: List[Text],
-    bboxes_string: str,
-    width: int,
-    height: int,
-) -> List[Text]:
-    """
-    Get the bounding box of each element and add it to element.metadata.coordinates
-
-    Args:
-        elements: elements containing text detected by pytesseract.image_to_string.
-        bboxes_string (str): The return value of pytesseract.image_to_boxes.
-        width: width of image
-        height: height of image
-    """
-    # (NOTE) jennings: This function was written with pytesseract in mind, but
-    # paddle returns similar values via `ocr.ocr(img)`.
-    # See more at issue #1176: https://github.com/Unstructured-IO/unstructured/issues/1176
-    point_space = PointSpace(
-        width=width,
-        height=height,
-    )
-    pixel_space = PixelSpace(
-        width=width,
-        height=height,
-    )
-
-    boxes = bboxes_string.strip().split("\n")
-    box_idx = 0
-    for element in elements:
-        if not element.text:
-            box_idx += 1
-            continue
-        try:
-            while boxes[box_idx][0] != element.text[0]:
-                box_idx += 1
-        except IndexError:
-            break
-        char_count = len(element.text.replace(" ", ""))
-        if box_idx + char_count > len(boxes):
-            break
-        _points, char_count = _get_element_box(
-            boxes=boxes[box_idx : box_idx + char_count],  # noqa
-            char_count=char_count,
-        )
-        box_idx += char_count
-
-        converted_points = point_space.convert_multiple_coordinates_to_new_system(
-            pixel_space,
-            _points,
-        )
-
-        element.metadata.coordinates = CoordinatesMetadata(
-            points=converted_points,
-            system=pixel_space,
-        )
-    return elements
-
-
-@requires_dependencies("unstructured_pytesseract")
+@requires_dependencies("unstructured_pytesseract", "unstructured_inference")
 def _partition_pdf_or_image_with_ocr(
     filename: str = "",
     file: Optional[Union[bytes, IO[bytes]]] = None,
     include_page_breaks: bool = False,
     languages: Optional[List[str]] = ["eng"],
     is_image: bool = False,
-    max_partition: Optional[int] = 1500,
-    min_partition: Optional[int] = 0,
     metadata_last_modified: Optional[str] = None,
+    **kwargs,
 ):
-    """Partitions an image or PDF using Tesseract OCR. For PDFs, each page is converted
+    """Partitions an image or PDF using OCR. For PDFs, each page is converted
     to an image prior to processing."""
-    import unstructured_pytesseract
 
-    ocr_languages = prepare_languages_for_tesseract(languages)
-
+    elements = []
     if is_image:
-        if file is not None:
-            image = PIL.Image.open(file)
-            text, _bboxes = unstructured_pytesseract.run_and_get_multiple_output(
-                np.array(image),
-                extensions=["txt", "box"],
-                lang=ocr_languages,
-            )
-        else:
-            image = PIL.Image.open(filename)
-            text, _bboxes = unstructured_pytesseract.run_and_get_multiple_output(
-                np.array(image),
-                extensions=["txt", "box"],
-                lang=ocr_languages,
-            )
-        elements = partition_text(
-            text=text,
-            max_partition=max_partition,
-            min_partition=min_partition,
-            metadata_last_modified=metadata_last_modified,
-            detection_origin="OCR",
-        )
-        width, height = image.size
-        _add_pytesseract_bboxes_to_elements(
-            elements=cast(List[Text], elements),
-            bboxes_string=_bboxes,
-            width=width,
-            height=height,
-        )
+        images = []
+        image = PILImage.open(file) if file is not None else PILImage.open(filename)
+        images.append(image)
 
+        for i, image in enumerate(images):
+            page_elements = _partition_pdf_or_image_with_ocr_from_image(
+                image=image,
+                languages=languages,
+                page_number=i + 1,
+                include_page_breaks=include_page_breaks,
+                metadata_last_modified=metadata_last_modified,
+                **kwargs,
+            )
+            elements.extend(page_elements)
     else:
-        elements = []
         page_number = 0
         for image in convert_pdf_to_images(filename, file):
             page_number += 1
-            metadata = ElementMetadata(
-                filename=filename,
-                page_number=page_number,
-                last_modified=metadata_last_modified,
+            page_elements = _partition_pdf_or_image_with_ocr_from_image(
+                image=image,
                 languages=languages,
+                page_number=page_number,
+                include_page_breaks=include_page_breaks,
+                metadata_last_modified=metadata_last_modified,
+                **kwargs,
             )
-            metadata.detection_origin = "OCR"
-            _text, _bboxes = unstructured_pytesseract.run_and_get_multiple_output(
-                image,
-                extensions=["txt", "box"],
-                lang=ocr_languages,
-            )
-            width, height = image.size
+            elements.extend(page_elements)
 
-            _elements = partition_text(
-                text=_text,
-                max_partition=max_partition,
-                min_partition=min_partition,
-            )
-
-            for element in _elements:
-                element.metadata = metadata
-
-            _add_pytesseract_bboxes_to_elements(
-                elements=cast(List[Text], _elements),
-                bboxes_string=_bboxes,
-                width=width,
-                height=height,
-            )
-
-            elements.extend(_elements)
-            if include_page_breaks:
-                elements.append(PageBreak(text=""))
     return elements
+
+
+def _partition_pdf_or_image_with_ocr_from_image(
+    image: PILImage,
+    languages: Optional[List[str]] = None,
+    page_number: int = 1,
+    include_page_breaks: bool = False,
+    metadata_last_modified: Optional[str] = None,
+    sort_mode: str = SORT_MODE_XY_CUT,
+    **kwargs,
+) -> List[Element]:
+    """Extract `unstructured` elements from an image using OCR and perform partitioning."""
+
+    from unstructured.partition.pdf_image.ocr import (
+        get_ocr_agent,
+    )
+
+    ocr_agent = get_ocr_agent()
+    ocr_languages = prepare_languages_for_tesseract(languages)
+
+    # NOTE(christine): `unstructured_pytesseract.image_to_string()` returns sorted text
+    if ocr_agent.is_text_sorted():
+        sort_mode = SORT_MODE_DONT
+
+    ocr_data = ocr_agent.get_layout_elements_from_image(
+        image=image,
+        ocr_languages=ocr_languages,
+    )
+
+    metadata = ElementMetadata(
+        last_modified=metadata_last_modified,
+        filetype=image.format,
+        page_number=page_number,
+        languages=languages,
+    )
+
+    page_elements = ocr_data_to_elements(
+        ocr_data,
+        image_size=image.size,
+        common_metadata=metadata,
+    )
+
+    sorted_page_elements = page_elements
+    if sort_mode != SORT_MODE_DONT:
+        sorted_page_elements = sort_page_elements(page_elements, sort_mode)
+
+    if include_page_breaks:
+        sorted_page_elements.append(PageBreak(text=""))
+
+    return page_elements
 
 
 def check_coords_within_boundary(
@@ -934,7 +1017,7 @@ def get_uris(
     height: float,
     coordinate_system: Union[PixelSpace, PointSpace],
     page_number: int,
-) -> List[dict]:
+) -> List[Dict[str, Any]]:
     """
     Extracts URI annotations from a single or a list of PDF object references on a specific page.
     The type of annots (list or not) depends on the pdf formatting. The function detectes the type
@@ -954,7 +1037,10 @@ def get_uris(
     """
     if isinstance(annots, List):
         return get_uris_from_annots(annots, height, coordinate_system, page_number)
-    return get_uris_from_annots(annots.resolve(), height, coordinate_system, page_number)
+    resolved_annots = annots.resolve()
+    if resolved_annots is None:
+        return []
+    return get_uris_from_annots(resolved_annots, height, coordinate_system, page_number)
 
 
 def get_uris_from_annots(
@@ -962,7 +1048,7 @@ def get_uris_from_annots(
     height: Union[int, float],
     coordinate_system: Union[PixelSpace, PointSpace],
     page_number: int,
-) -> List[dict]:
+) -> List[Dict[str, Any]]:
     """
     Extracts URI annotations from a list of PDF object references.
 
@@ -980,13 +1066,33 @@ def get_uris_from_annots(
     """
     annotation_list = []
     for annotation in annots:
+        # Check annotation is valid for extraction
         annotation_dict = try_resolve(annotation)
-        if str(annotation_dict["Subtype"]) != "/'Link'" or "A" not in annotation_dict:
+        if not isinstance(annotation_dict, dict):
             continue
-        x1, y1, x2, y2 = rect_to_bbox(annotation_dict["Rect"], height)
+        subtype = annotation_dict["Subtype"] if "Subtype" in annotation_dict else None
+        if not subtype or isinstance(subtype, PDFObjRef) or str(subtype) != "/'Link'":
+            continue
+        # Extract bounding box and update coordinates
+        rect = annotation_dict["Rect"] if "Rect" in annotation_dict else None
+        if not rect or isinstance(rect, PDFObjRef) or len(rect) != 4:
+            continue
+        x1, y1, x2, y2 = rect_to_bbox(rect, height)
+        points = ((x1, y1), (x1, y2), (x2, y2), (x2, y1))
+        coordinates_metadata = CoordinatesMetadata(
+            points=points,
+            system=coordinate_system,
+        )
+        # Extract type
+        if "A" not in annotation_dict:
+            continue
         uri_dict = try_resolve(annotation_dict["A"])
-        uri_type = str(uri_dict["S"])
-
+        if not isinstance(uri_dict, dict):
+            continue
+        uri_type = None
+        if "S" in uri_dict and not isinstance(uri_dict["S"], PDFObjRef):
+            uri_type = str(uri_dict["S"])
+        # Extract URI link
         uri = None
         try:
             if uri_type == "/'URI'":
@@ -995,13 +1101,6 @@ def get_uris_from_annots(
                 uri = try_resolve(try_resolve(uri_dict["D"])).decode("utf-8")
         except Exception:
             pass
-
-        points = ((x1, y1), (x1, y2), (x2, y2), (x2, y1))
-
-        coordinates_metadata = CoordinatesMetadata(
-            points=points,
-            system=coordinate_system,
-        )
 
         annotation_list.append(
             {
@@ -1024,29 +1123,6 @@ def try_resolve(annot: PDFObjRef):
         return annot.resolve()
     except Exception:
         return annot
-
-
-def rect_to_bbox(
-    rect: Tuple[float, float, float, float],
-    height: float,
-) -> Tuple[float, float, float, float]:
-    """
-    Converts a PDF rectangle coordinates (x1, y1, x2, y2) to a bounding box in the specified
-    coordinate system where the vertical axis is measured from the top of the page.
-
-    Args:
-        rect (Tuple[float, float, float, float]): A tuple representing a PDF rectangle
-            coordinates (x1, y1, x2, y2).
-        height (float): The height of the page in the specified coordinate system.
-
-    Returns:
-        Tuple[float, float, float, float]: A tuple representing the bounding box coordinates
-        (x1, y1, x2, y2) with the y-coordinates adjusted to be measured from the top of the page.
-    """
-    x1, y2, x2, y1 = rect
-    y1 = height - y1
-    y2 = height - y2
-    return (x1, y1, x2, y2)
 
 
 def calculate_intersection_area(
@@ -1100,16 +1176,16 @@ def calculate_bbox_area(bbox: Tuple[float, float, float, float]) -> float:
 
 
 def check_annotations_within_element(
-    annotation_list: List[dict],
+    annotation_list: List[Dict[str, Any]],
     element_bbox: Tuple[float, float, float, float],
     page_number: int,
     threshold: float = 0.9,
-) -> List[dict]:
+) -> List[Dict[str, Any]]:
     """
     Filter annotations that are within or highly overlap with a specified element on a page.
 
     Args:
-        annotation_list (List[dict]): A list of dictionaries, each containing information
+        annotation_list (List[Dict[str,Any]]): A list of dictionaries, each containing information
             about an annotation.
         element_bbox (Tuple[float, float, float, float]): The bounding box coordinates of the
             specified element in the bbox format (x1, y1, x2, y2).
@@ -1119,9 +1195,9 @@ def check_annotations_within_element(
             Default is 0.9.
 
     Returns:
-        List[dict]: A list of dictionaries containing information about annotations that are
-        within or highly overlap with the specified element on the given page, based on the
-        specified threshold.
+        List[Dict[str,Any]]: A list of dictionaries containing information about annotations
+        that are within or highly overlap with the specified element on the given page, based on
+        the specified threshold.
     """
     annotations_within_element = []
     for annotation in annotation_list:
@@ -1138,7 +1214,7 @@ def check_annotations_within_element(
 def get_word_bounding_box_from_element(
     obj: LTTextBox,
     height: float,
-) -> Tuple[List[LTChar], List[dict]]:
+) -> Tuple[List[LTChar], List[Dict[str, Any]]]:
     """
     Extracts characters and word bounding boxes from a PDF text element.
 
@@ -1147,10 +1223,10 @@ def get_word_bounding_box_from_element(
         height (float): The height of the page in the specified coordinate system.
 
     Returns:
-        Tuple[List[LTChar], List[dict]]: A tuple containing two lists:
+        Tuple[List[LTChar], List[Dict[str,Any]]]: A tuple containing two lists:
             - List[LTChar]: A list of LTChar objects representing individual characters.
-            - List[dict]: A list of dictionaries, each containing information about a word,
-              including its text, bounding box, and start index in the element's text.
+            - List[Dict[str,Any]]]: A list of dictionaries, each containing information about
+                a word, including its text, bounding box, and start index in the element's text.
     """
     characters = []
     words = []
@@ -1198,15 +1274,15 @@ def get_word_bounding_box_from_element(
     return characters, words
 
 
-def map_bbox_and_index(words: List[dict], annot: dict):
+def map_bbox_and_index(words: List[Dict[str, Any]], annot: Dict[str, Any]):
     """
     Maps a bounding box annotation to the corresponding text and start index within a list of words.
 
     Args:
-        words (List[dict]): A list of dictionaries, each containing information about a word,
-            including its text, bounding box, and start index.
-        annot (dict): The annotation dictionary to be mapped, which will be updated with "text" and
-            "start_index" fields.
+        words (List[Dict[str,Any]]): A list of dictionaries, each containing information about
+            a word, including its text, bounding box, and start index.
+        annot (Dict[str,Any]): The annotation dictionary to be mapped, which will be updated with
+        "text" and "start_index" fields.
 
     Returns:
         dict: The updated annotation dictionary with "text" representing the mapped text and

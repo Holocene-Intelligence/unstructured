@@ -4,19 +4,12 @@ from dataclasses import dataclass
 import click
 
 from unstructured.ingest.cli.base.src import BaseSrcCmd
-from unstructured.ingest.cli.interfaces import (
-    CliMixin,
-)
-from unstructured.ingest.interfaces import BaseConfig
+from unstructured.ingest.cli.interfaces import CliConfig, DelimitedString
+from unstructured.ingest.connector.github import SimpleGitHubConfig
 
 
 @dataclass
-class GithubCliConfig(BaseConfig, CliMixin):
-    url: str
-    git_access_token: t.Optional[str] = None
-    git_branch: t.Optional[str] = None
-    git_file_glob: t.Optional[str] = None
-
+class GithubCliConfig(SimpleGitHubConfig, CliConfig):
     @staticmethod
     def get_cli_options() -> t.List[click.Option]:
         options = [
@@ -45,7 +38,7 @@ class GithubCliConfig(BaseConfig, CliMixin):
             click.Option(
                 ["--git-file-glob"],
                 default=None,
-                type=str,
+                type=DelimitedString(),
                 help="A comma-separated list of file globs to limit which "
                 "types of files are accepted, e.g. '*.html,*.txt'",
             ),
@@ -54,5 +47,8 @@ class GithubCliConfig(BaseConfig, CliMixin):
 
 
 def get_base_src_cmd() -> BaseSrcCmd:
-    cmd_cls = BaseSrcCmd(cmd_name="github", cli_config=GithubCliConfig)
+    cmd_cls = BaseSrcCmd(
+        cmd_name="github",
+        cli_config=GithubCliConfig,
+    )
     return cmd_cls

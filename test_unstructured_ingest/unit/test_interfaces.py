@@ -8,7 +8,7 @@ import pytest
 from unstructured.documents.elements import DataSourceMetadata
 from unstructured.ingest.interfaces import (
     BaseConnectorConfig,
-    BaseIngestDoc,
+    BaseSingleIngestDoc,
     PartitionConfig,
     ProcessorConfig,
     ReadConfig,
@@ -25,12 +25,12 @@ TEST_FILE_PATH = os.path.join(EXAMPLE_DOCS_DIRECTORY, "book-war-and-peace-1p.txt
 
 
 @dataclass
-class TestConfig(BaseConnectorConfig):
+class ExampleConfig(BaseConnectorConfig):
     id: str
     path: str
 
 
-TEST_CONFIG = TestConfig(id=TEST_ID, path=TEST_FILE_PATH)
+TEST_CONFIG = ExampleConfig(id=TEST_ID, path=TEST_FILE_PATH)
 TEST_SOURCE_URL = "test-source-url"
 TEST_VERSION = "1.1.1"
 TEST_RECORD_LOCATOR = {"id": "data-source-id"}
@@ -40,8 +40,8 @@ TEST_DATE_PROCESSSED = "2022-12-13T15:44:08"
 
 
 @dataclass
-class TestIngestDoc(BaseIngestDoc):
-    connector_config: TestConfig
+class ExampleIngestDoc(BaseSingleIngestDoc):
+    connector_config: ExampleConfig
 
     @property
     def filename(self):
@@ -114,7 +114,7 @@ def partition_file_test_results(partition_test_results):
 def test_partition_file():
     """Validate partition_file returns a list of dictionaries with the expected keys,
     metadatakeys, and data source metadata values."""
-    test_ingest_doc = TestIngestDoc(
+    test_ingest_doc = ExampleIngestDoc(
         connector_config=TEST_CONFIG,
         read_config=ReadConfig(download_dir=TEST_DOWNLOAD_DIR),
         processor_config=ProcessorConfig(output_dir=TEST_OUTPUT_DIR),
@@ -161,7 +161,7 @@ def test_process_file_fields_include_default(mocker, partition_test_results):
         "unstructured.ingest.interfaces.partition",
         return_value=partition_test_results,
     )
-    test_ingest_doc = TestIngestDoc(
+    test_ingest_doc = ExampleIngestDoc(
         connector_config=TEST_CONFIG,
         read_config=ReadConfig(download_dir=TEST_DOWNLOAD_DIR),
         processor_config=ProcessorConfig(output_dir=TEST_OUTPUT_DIR),
@@ -197,7 +197,7 @@ def test_process_file_metadata_includes_filename_and_filetype(
     partition_config = PartitionConfig(
         metadata_include=["filename", "filetype"],
     )
-    test_ingest_doc = TestIngestDoc(
+    test_ingest_doc = ExampleIngestDoc(
         connector_config=TEST_CONFIG,
         read_config=ReadConfig(download_dir=TEST_DOWNLOAD_DIR),
         processor_config=ProcessorConfig(output_dir=TEST_OUTPUT_DIR),
@@ -221,7 +221,7 @@ def test_process_file_metadata_exclude_filename_pagenum(mocker, partition_test_r
     partition_config = PartitionConfig(
         metadata_exclude=["filename", "page_number"],
     )
-    test_ingest_doc = TestIngestDoc(
+    test_ingest_doc = ExampleIngestDoc(
         connector_config=TEST_CONFIG,
         read_config=ReadConfig(download_dir=TEST_DOWNLOAD_DIR),
         processor_config=ProcessorConfig(
@@ -241,10 +241,10 @@ def test_process_file_flatten_metadata(mocker, partition_test_results):
         return_value=partition_test_results,
     )
     partition_config = PartitionConfig(
-        metadata_include=["filename", "data_source"],
+        metadata_include=["filename", "file_directory", "filetype"],
         flatten_metadata=True,
     )
-    test_ingest_doc = TestIngestDoc(
+    test_ingest_doc = ExampleIngestDoc(
         connector_config=TEST_CONFIG,
         read_config=ReadConfig(download_dir=TEST_DOWNLOAD_DIR),
         processor_config=ProcessorConfig(
@@ -252,6 +252,6 @@ def test_process_file_flatten_metadata(mocker, partition_test_results):
         ),
     )
     isd_elems = test_ingest_doc.process_file(partition_config=partition_config)
-    expected_keys = {"element_id", "text", "type", "filename", "data_source"}
+    expected_keys = {"element_id", "text", "type", "filename", "file_directory", "filetype"}
     for elem in isd_elems:
         assert expected_keys == set(elem.keys())
