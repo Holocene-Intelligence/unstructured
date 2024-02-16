@@ -11,23 +11,26 @@ from unstructured.ingest.error import EmbeddingEncoderConnectionError
 from unstructured.utils import requires_dependencies
 
 if TYPE_CHECKING:
-    from langchain_community.embeddings import OpenAIEmbeddings
+    from openai import OpenAI
+
+OCTOAI_BASE_URL = "https://text.octoai.run/v1"
 
 
 @dataclass
-class OpenAIEmbeddingConfig(EmbeddingConfig):
+class OctoAiEmbeddingConfig(EmbeddingConfig):
     api_key: str
-    model_name: str = "text-embedding-ada-002"
+    model_name: str = "thenlper/gte-large"
 
 
 @dataclass
-class OpenAIEmbeddingEncoder(BaseEmbeddingEncoder):
-    config: OpenAIEmbeddingConfig
-    _client: Optional["OpenAIEmbeddings"] = field(init=False, default=None)
+class OctoAIEmbeddingEncoder(BaseEmbeddingEncoder):
+    config: OctoAiEmbeddingConfig
+    # Uses the OpenAI SDK
+    _client: Optional["OpenAI"] = field(init=False, default=None)
     _exemplary_embedding: Optional[List[float]] = field(init=False, default=None)
 
     @property
-    def client(self) -> "OpenAIEmbeddings":
+    def client(self) -> "OpenAI":
         if self._client is None:
             self._client = self.create_client()
         return self._client
@@ -35,7 +38,7 @@ class OpenAIEmbeddingEncoder(BaseEmbeddingEncoder):
     @property
     def exemplary_embedding(self) -> List[float]:
         if self._exemplary_embedding is None:
-            self._exemplary_embedding = self.client.embed_query("Q")
+            self._exemplary_embedding = self.embed_query("Q")
         return self._exemplary_embedding
 
     def initialize(self):
@@ -48,10 +51,11 @@ class OpenAIEmbeddingEncoder(BaseEmbeddingEncoder):
         return np.isclose(np.linalg.norm(self.exemplary_embedding), 1.0)
 
     def embed_query(self, query):
-        return self.client.embed_query(str(query))
+        response = self.client.embeddings.create(input=str(query), model=self.config.model_name)
+        return response.data[0].embedding
 
     def embed_documents(self, elements: List[Element]) -> List[Element]:
-        embeddings = self.client.embed_documents([str(e) for e in elements])
+        embeddings = [self.embed_query(e) for e in elements]
         elements_with_embeddings = self._add_embeddings_to_elements(elements, embeddings)
         return elements_with_embeddings
 
@@ -65,15 +69,11 @@ class OpenAIEmbeddingEncoder(BaseEmbeddingEncoder):
 
     @EmbeddingEncoderConnectionError.wrap
     @requires_dependencies(
-        ["langchain_community", "openai", "tiktoken"],
-        extras="openai",
+        ["openai", "tiktoken"],
+        extras="embed-openai",
     )
-    def create_client(self) -> "OpenAIEmbeddings":
-        """Creates a langchain OpenAI python client to embed elements."""
-        from langchain_community.embeddings import OpenAIEmbeddings
+    def create_client(self) -> "OpenAI":
+        """Creates an OpenAI python client to embed elements. Uses the OpenAI SDK."""
+        from openai import OpenAI
 
-        openai_client = OpenAIEmbeddings(
-            openai_api_key=self.config.api_key,
-            model=self.config.model_name,  # type:ignore
-        )
-        return openai_client
+        return OpenAI(api_key=self.config.api_key, base_url=OCTOAI_BASE_URL)
